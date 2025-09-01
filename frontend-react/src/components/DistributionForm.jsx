@@ -89,6 +89,20 @@ export default function DistributionForm() {
     } catch {}
   }
 
+      // === Helpers para ejes "lindos" ===
+    const niceMax = (v) => {
+      if (v <= 0) return 1
+      const pow10 = Math.pow(10, Math.floor(Math.log10(v)))
+      const d = v / pow10
+      let nice
+      if (d <= 1) nice = 1
+      else if (d <= 2) nice = 2
+      else if (d <= 5) nice = 5
+      else nice = 10
+      return nice * pow10
+    }
+
+
   return (
     <section className="card">
       <form onSubmit={handleSubmit} className="form">
@@ -235,27 +249,123 @@ export default function DistributionForm() {
         {histogram && (
           <div className="results-box" style={{ marginTop: '16px', height: 'auto' }}>
             <h4>Histograma de frecuencias (k={histogram.k})</h4>
-            <svg width="100%" height="260">
-              {histogram.bins.map((b, i) => {
-                const barW = 100 / histogram.bins.length
-                const maxF = Math.max(...histogram.bins.map(x => x.freq))
-                const barH = (b.freq / maxF) * 200
+            <svg width="100%" viewBox="0 0 860 340" role="img" aria-label={`Histograma con ${histogram.k} intervalos`}>
+              {/* Márgenes y área de chart */}
+              {(() => {
+                const M = { top: 20, right: 16, bottom: 70, left: 64 }
+                const W = 860, H = 340
+                const CW = W - M.left - M.right
+                const CH = H - M.top - M.bottom
+
+                const bins = histogram.bins
+                const maxF = Math.max(...bins.map(b => b.freq), 1)
+                const yMax = niceMax(maxF)
+                const yTicks = 5
+                const xStep = CW / bins.length
+                const gap = Math.max(2, xStep * 0.12) // pequeño gap
+                const barW = xStep - gap
+
+                // Título corto con metadatos
+                const n = bins.reduce((a, b) => a + b.freq, 0)
+
                 return (
-                  <g key={i}>
-                    <rect
-                      x={`${i * barW}%`}
-                      y={220 - barH}
-                      width={`${barW - 1}%`}
-                      height={barH}
-                      fill="#22d3ee"
-                    />
-                    <text x={`${i * barW + barW / 2}%`} y={240} fontSize="10" textAnchor="middle">
-                      {b.index}
+                  <g>
+                    {/* Encabezado */}
+                    <text x={M.left} y={16} fontSize="13" fill="var(--muted)">
+                      {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
+                    </text>
+
+                    {/* Ejes */}
+                    <line x1={M.left} y1={M.top} x2={M.left} y2={M.top + CH} stroke="var(--border)" />
+                    <line x1={M.left} y1={M.top + CH} x2={M.left + CW} y2={M.top + CH} stroke="var(--border)" />
+
+                    {/* Grid y ticks Y */}
+                    {Array.from({ length: yTicks + 1 }, (_, i) => {
+                      const v = (yMax / yTicks) * i
+                      const y = M.top + CH - (v / yMax) * CH
+                      return (
+                        <g key={`gy-${i}`}>
+                          <line x1={M.left} y1={y} x2={M.left + CW} y2={y} stroke="rgba(255,255,255,0.06)" />
+                          <text x={M.left - 8} y={y + 4} textAnchor="end" fontSize="11" fill="var(--muted)">
+                            {v}
+                          </text>
+                        </g>
+                      )
+                    })}
+
+                    {/* Barras + valor de frecuencia sobre cada barra */}
+                    {bins.map((b, i) => {
+                      const x = M.left + i * xStep + gap / 2
+                      const h = (b.freq / yMax) * CH
+                      const y = M.top + CH - h
+                      return (
+                        <g key={i}>
+                          <rect x={x} y={y} width={barW} height={h} fill="var(--accent)">
+                            <title>{`Intervalo ${b.label}\nfrecuencia: ${b.freq}`}</title>
+                          </rect>
+                          {/* Frecuencia arriba */}
+                          <text x={x + barW / 2} y={y - 6} textAnchor="middle" fontSize="11">
+                            {b.freq}
+                          </text>
+                        </g>
+                      )
+                    })}
+
+                    {/* Ticks X y rótulos con límites de intervalo */}
+                    {bins.map((b, i) => {
+                      const xTick = M.left + i * xStep + xStep / 2
+                      return (
+                        <g key={`gx-${i}`}>
+                          <line x1={xTick} y1={M.top + CH} x2={xTick} y2={M.top + CH + 6} stroke="var(--border)" />
+                          <text
+                            x={xTick}
+                            y={M.top + CH + 20}
+                            textAnchor="middle"
+                            fontSize="11"
+                            fill="var(--text)"
+                          >
+                            {b.index}
+                          </text>
+                          {/* Límite de intervalo (label completa) debajo, inclinada si es larga */}
+                          <text
+                            x={xTick}
+                            y={M.top + CH + 42}
+                            textAnchor="middle"
+                            fontSize="10"
+                            fill="var(--muted)"
+                            transform={`rotate(-20 ${xTick} ${M.top + CH + 42})`}
+                          >
+                            {b.label}
+                          </text>
+                        </g>
+                      )
+                    })}
+
+                    {/* Etiquetas de ejes */}
+                    <text
+                      x={M.left + CW / 2}
+                      y={H - 10}
+                      textAnchor="middle"
+                      fontSize="12"
+                      fontWeight="600"
+                    >
+                      Intervalo [límites]
+                    </text>
+                    <text
+                      x={14}
+                      y={M.top + CH / 2}
+                      textAnchor="middle"
+                      fontSize="12"
+                      fontWeight="600"
+                      transform={`rotate(-90 14 ${M.top + CH / 2})`}
+                    >
+                      Frecuencia (f)
                     </text>
                   </g>
                 )
-              })}
+              })()}
             </svg>
+
             <table style={{ width: '100%', marginTop: '12px', fontSize: '13px' }}>
               <thead>
                 <tr>
