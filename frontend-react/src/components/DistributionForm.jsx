@@ -14,9 +14,11 @@ export default function DistributionForm() {
   const [distribution, setDistribution] = useState('uniforme')
   const [count, setCount] = useState(10)
   const [params, setParams] = useState({ A: 0, B: 1, media: 1, desviacion: 1 })
+  const [intervals, setIntervals] = useState(10) // NUEVO
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [numbers, setNumbers] = useState([])
+  const [histogram, setHistogram] = useState(null) // NUEVO
 
   const showUniforme = distribution === 'uniforme'
   const showExponencial = distribution === 'exponencial'
@@ -50,6 +52,7 @@ export default function DistributionForm() {
     setLoading(true)
     setError('')
     setNumbers([])
+    setHistogram(null)
     try {
       const payload = {
         distribucion: distribution,
@@ -58,7 +61,8 @@ export default function DistributionForm() {
           ? { A: Number(params.A), B: Number(params.B) }
           : showExponencial
           ? { media: Number(params.media) }
-          : { media: Number(params.media), desviacion: Number(params.desviacion) }
+          : { media: Number(params.media), desviacion: Number(params.desviacion) },
+        k_intervals: Number(intervals) // NUEVO
       }
       const res = await fetch(API_URL, {
         method: 'POST',
@@ -71,21 +75,12 @@ export default function DistributionForm() {
       }
       const data = await res.json()
       setNumbers(data.numbers || [])
+      setHistogram(data.histogram || null) // NUEVO
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }
-
-  const handleDownloadCSV = () => {
-    const blob = new Blob([toCSV(numbers)], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `numeros_${distribution}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
   const handleCopy = async () => {
@@ -125,6 +120,16 @@ export default function DistributionForm() {
             required
           />
           <small>Solo enteros. Máx. 1.000.000</small>
+        </div>
+
+        {/* NUEVO: selector de intervalos */}
+        <div className="form-row">
+          <label htmlFor="intervals">Intervalos (k)</label>
+          <select id="intervals" value={intervals} onChange={(e) => setIntervals(e.target.value)}>
+            {[5, 10, 15, 20, 25].map((k) => (
+              <option key={k} value={k}>{k}</option>
+            ))}
+          </select>
         </div>
 
         {showUniforme && (
@@ -214,7 +219,6 @@ export default function DistributionForm() {
           <h3>Resultados</h3>
           <div className="results-actions">
             <button onClick={handleCopy} disabled={numbers.length === 0}>Copiar</button>
-            <button onClick={handleDownloadCSV} disabled={numbers.length === 0}>Descargar CSV</button>
           </div>
         </div>
         <div className="results-box" role="region" aria-label="Números generados">
@@ -226,6 +230,58 @@ export default function DistributionForm() {
             </ol>
           )}
         </div>
+
+        {/* NUEVO: histograma y tabla */}
+        {histogram && (
+          <div className="results-box" style={{ marginTop: '16px', height: 'auto' }}>
+            <h4>Histograma de frecuencias (k={histogram.k})</h4>
+            <svg width="100%" height="260">
+              {histogram.bins.map((b, i) => {
+                const barW = 100 / histogram.bins.length
+                const maxF = Math.max(...histogram.bins.map(x => x.freq))
+                const barH = (b.freq / maxF) * 200
+                return (
+                  <g key={i}>
+                    <rect
+                      x={`${i * barW}%`}
+                      y={220 - barH}
+                      width={`${barW - 1}%`}
+                      height={barH}
+                      fill="#22d3ee"
+                    />
+                    <text x={`${i * barW + barW / 2}%`} y={240} fontSize="10" textAnchor="middle">
+                      {b.index}
+                    </text>
+                  </g>
+                )
+              })}
+            </svg>
+            <table style={{ width: '100%', marginTop: '12px', fontSize: '13px' }}>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Intervalo</th>
+                  <th>f</th>
+                  <th>f/n</th>
+                  <th>F acum</th>
+                  <th>F/n acum</th>
+                </tr>
+              </thead>
+              <tbody>
+                {histogram.bins.map((b) => (
+                  <tr key={b.index}>
+                    <td>{b.index}</td>
+                    <td>{b.label}</td>
+                    <td>{b.freq}</td>
+                    <td>{b.rel.toFixed(4)}</td>
+                    <td>{b.cum}</td>
+                    <td>{b.cum_rel.toFixed(4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </section>
   )
