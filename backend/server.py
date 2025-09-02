@@ -117,16 +117,27 @@ def gen_exponencial(media: float, n: int) -> Iterator[float]:
 
 
 def gen_normal(mu: float, sigma: float, n: int) -> Iterator[float]:
-    """Aproxima N(mu, sigma) por Convolución con 12 uniformes."""
+    """Genera N(mu, sigma) usando el método de Box–Muller (versión trigonométrica)."""
     i = 0
+    two_pi = 2.0 * math.pi
     while i < n:
-        s = 0.0
-        for _ in range(12):          # 12 uniformes
-            s += u01()
-        z = s - 6.0                  # media 0, var 1 (porque 12/12 = 1)
-        yield mu + sigma * z
+        # Evitar u1=0 para que log(u1) sea válido
+        u1 = u01()
+        while u1 <= 1e-12:
+            u1 = u01()
+        u2 = u01()
+
+        r = math.sqrt(-2.0 * math.log(u1))
+        theta = two_pi * u2
+
+        z0 = r * math.cos(theta)
+        yield mu + sigma * z0
         i += 1
 
+        if i < n:
+            z1 = r * math.sin(theta)
+            yield mu + sigma * z1
+            i += 1
 
 # -------------------------- Histograma / Tabla de frecuencias --------------------------
 def build_histogram(values: List[float], k: int) -> Dict[str, Any]:
