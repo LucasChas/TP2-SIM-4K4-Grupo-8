@@ -23,7 +23,8 @@ export default function DistributionForm() {
   const showUniforme = distribution === 'uniforme'
   const showExponencial = distribution === 'exponencial'
   const showNormal = distribution === 'normal'
-
+  const [alpha, setAlpha] = useState(0.05)
+  const [gof, setGof] = useState(null)
   const canSubmit = useMemo(() => {
     if (!isIntegerString(count) || Number(count) < 1 || Number(count) > 1000000) return false
     if (showUniforme) {
@@ -101,298 +102,376 @@ export default function DistributionForm() {
       else nice = 10
       return nice * pow10
     }
+  const handleGoF = async () => {
+  if (!histogram || numbers.length === 0) return
+  try {
+    const payload = {
+      distribucion: distribution,
+      params: showUniforme
+        ? { A: Number(params.A), B: Number(params.B) }
+        : showExponencial
+        ? { media: Number(params.media) }
+        : { media: Number(params.media), desviacion: Number(params.desviacion) },
+      n: Number(count),
+      edges: histogram.edges,
+      observed: histogram.bins.map(b => b.freq),
+      alpha: Number(alpha)
+    }
+    const res = await fetch('/api/gof', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) {
+      const info = await res.json().catch(() => ({}))
+      throw new Error(info?.detail || 'Error en χ²')
+    }
+    const data = await res.json()
+    setGof(data)
+  } catch (e) {
+    setGof({ error: e.message })
+  }
+}
 
 
-  return (
-    <section className="card">
-      <form onSubmit={handleSubmit} className="form">
-        <div className="form-row">
-          <label htmlFor="distribution">Distribución</label>
-          <select
-            id="distribution"
-            value={distribution}
-            onChange={(e) => setDistribution(e.target.value)}
-          >
-            <option value="uniforme">Uniforme [A, B]</option>
-            <option value="exponencial">Exponencial (media)</option>
-            <option value="normal">Normal (media, desviación)</option>
-          </select>
+return (
+  <section className="card">
+    <form onSubmit={handleSubmit} className="form">
+      <div className="form-row">
+        <label htmlFor="distribution">Distribución</label>
+        <select
+          id="distribution"
+          value={distribution}
+          onChange={(e) => setDistribution(e.target.value)}
+        >
+          <option value="uniforme">Uniforme [A, B]</option>
+          <option value="exponencial">Exponencial (media)</option>
+          <option value="normal">Normal (media, desviación)</option>
+        </select>
+      </div>
+
+      <div className="form-row">
+        <label htmlFor="count">Cantidad de números</label>
+        <input
+          id="count"
+          type="number"
+          min={1}
+          max={1000000}
+          step={1}
+          inputMode="numeric"
+          value={count}
+          onChange={(e) => setCount(e.target.value)}
+          placeholder="1 .. 1.000.000"
+          required
+        />
+        <small>Solo enteros. Máx. 1.000.000</small>
+      </div>
+
+      {/* Intervalos (k) */}
+      <div className="form-row">
+        <label htmlFor="intervals">Intervalos (k)</label>
+        <select id="intervals" value={intervals} onChange={(e) => setIntervals(e.target.value)}>
+          {[5, 10, 15, 20, 25].map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+      </div>
+
+      {showUniforme && (
+        <div className="grid-2">
+          <div className="form-row">
+            <label htmlFor="A">A (límite inferior)</label>
+            <input
+              id="A"
+              type="number"
+              value={params.A}
+              onChange={(e) => setParams({ ...params, A: e.target.value })}
+              required
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="B">B (límite superior)</label>
+            <input
+              id="B"
+              type="number"
+              value={params.B}
+              onChange={(e) => setParams({ ...params, B: e.target.value })}
+              required
+            />
+          </div>
+          <div className="hint full">
+            <small>Requisito: A &lt; B</small>
+          </div>
         </div>
+      )}
 
+      {showExponencial && (
         <div className="form-row">
-          <label htmlFor="count">Cantidad de números</label>
+          <label htmlFor="media-exp">Media</label>
           <input
-            id="count"
+            id="media-exp"
             type="number"
-            min={1}
-            max={1000000}
-            step={1}
-            inputMode="numeric"
-            value={count}
-            onChange={(e) => setCount(e.target.value)}
-            placeholder="1 .. 1.000.000"
+            min="0"
+            step="any"
+            value={params.media}
+            onChange={(e) => setParams({ ...params, media: e.target.value })}
             required
           />
-          <small>Solo enteros. Máx. 1.000.000</small>
+          <small>Debe ser &gt; 0</small>
         </div>
+      )}
 
-        {/* NUEVO: selector de intervalos */}
-        <div className="form-row">
-          <label htmlFor="intervals">Intervalos (k)</label>
-          <select id="intervals" value={intervals} onChange={(e) => setIntervals(e.target.value)}>
-            {[5, 10, 15, 20, 25].map((k) => (
-              <option key={k} value={k}>{k}</option>
-            ))}
-          </select>
-        </div>
-
-        {showUniforme && (
-          <div className="grid-2">
-            <div className="form-row">
-              <label htmlFor="A">A (límite inferior)</label>
-              <input
-                id="A"
-                type="number"
-                value={params.A}
-                onChange={(e) => setParams({ ...params, A: e.target.value })}
-                required
-              />
-            </div>
-            <div className="form-row">
-              <label htmlFor="B">B (límite superior)</label>
-              <input
-                id="B"
-                type="number"
-                value={params.B}
-                onChange={(e) => setParams({ ...params, B: e.target.value })}
-                required
-              />
-            </div>
-            <div className="hint full">
-              <small>Requisito: A &lt; B</small>
-            </div>
-          </div>
-        )}
-
-        {showExponencial && (
+      {showNormal && (
+        <div className="grid-2">
           <div className="form-row">
-            <label htmlFor="media-exp">Media</label>
+            <label htmlFor="media-norm">Media (μ)</label>
             <input
-              id="media-exp"
+              id="media-norm"
               type="number"
-              min="0"
               step="any"
               value={params.media}
               onChange={(e) => setParams({ ...params, media: e.target.value })}
               required
             />
+          </div>
+          <div className="form-row">
+            <label htmlFor="desv">Desviación (σ)</label>
+            <input
+              id="desv"
+              type="number"
+              min="0"
+              step="any"
+              value={params.desviacion}
+              onChange={(e) => setParams({ ...params, desviacion: e.target.value })}
+              required
+            />
             <small>Debe ser &gt; 0</small>
           </div>
-        )}
-
-        {showNormal && (
-          <div className="grid-2">
-            <div className="form-row">
-              <label htmlFor="media-norm">Media (μ)</label>
-              <input
-                id="media-norm"
-                type="number"
-                step="any"
-                value={params.media}
-                onChange={(e) => setParams({ ...params, media: e.target.value })}
-                required
-              />
-            </div>
-            <div className="form-row">
-              <label htmlFor="desv">Desviación (σ)</label>
-              <input
-                id="desv"
-                type="number"
-                min="0"
-                step="any"
-                value={params.desviacion}
-                onChange={(e) => setParams({ ...params, desviacion: e.target.value })}
-                required
-              />
-              <small>Debe ser &gt; 0</small>
-            </div>
-          </div>
-        )}
-
-        <div className="actions">
-          <button type="submit" disabled={!canSubmit || loading}>
-            {loading ? 'Generando…' : 'Generar'}
-          </button>
         </div>
+      )}
 
-        {error && <div className="error">{error}</div>}
-      </form>
+      <div className="actions">
+        <button type="submit" disabled={!canSubmit || loading}>
+          {loading ? 'Generando…' : 'Generar'}
+        </button>
+      </div>
 
-      <div className="results">
-        <div className="results-header">
-          <h3>Resultados</h3>
-          <div className="results-actions">
-            <button onClick={handleCopy} disabled={numbers.length === 0}>Copiar</button>
-          </div>
+      {error && <div className="error">{error}</div>}
+    </form>
+
+    <div className="results">
+      <div className="results-header">
+        <h3>Resultados</h3>
+        <div className="results-actions">
+          <button onClick={handleCopy} disabled={numbers.length === 0}>Copiar</button>
         </div>
-        <div className="results-box" role="region" aria-label="Números generados">
-          {numbers.length === 0 ? (
-            <p className="muted">No hay datos aún.</p>
-          ) : (
-            <ol>
-              {numbers.map((v, i) => <li key={i}><code>{v}</code></li>)}
-            </ol>
-          )}
-        </div>
+      </div>
 
-        {/* NUEVO: histograma y tabla */}
-        {histogram && (
-          <div className="results-box" style={{ marginTop: '16px', height: 'auto' }}>
-            <h4>Histograma de frecuencias (k={histogram.k})</h4>
-            <svg width="100%" viewBox="0 0 860 340" role="img" aria-label={`Histograma con ${histogram.k} intervalos`}>
-              {/* Márgenes y área de chart */}
-              {(() => {
-                const M = { top: 20, right: 16, bottom: 70, left: 64 }
-                const W = 860, H = 340
-                const CW = W - M.left - M.right
-                const CH = H - M.top - M.bottom
-
-                const bins = histogram.bins
-                const maxF = Math.max(...bins.map(b => b.freq), 1)
-                const yMax = niceMax(maxF)
-                const yTicks = 5
-                const xStep = CW / bins.length
-                const gap = Math.max(2, xStep * 0.12) // pequeño gap
-                const barW = xStep - gap
-
-                // Título corto con metadatos
-                const n = bins.reduce((a, b) => a + b.freq, 0)
-
-                return (
-                  <g>
-                    {/* Encabezado */}
-                    <text x={M.left} y={16} fontSize="13" fill="var(--muted)">
-                      {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
-                    </text>
-
-                    {/* Ejes */}
-                    <line x1={M.left} y1={M.top} x2={M.left} y2={M.top + CH} stroke="var(--border)" />
-                    <line x1={M.left} y1={M.top + CH} x2={M.left + CW} y2={M.top + CH} stroke="var(--border)" />
-
-                    {/* Grid y ticks Y */}
-                    {Array.from({ length: yTicks + 1 }, (_, i) => {
-                      const v = (yMax / yTicks) * i
-                      const y = M.top + CH - (v / yMax) * CH
-                      return (
-                        <g key={`gy-${i}`}>
-                          <line x1={M.left} y1={y} x2={M.left + CW} y2={y} stroke="rgba(255,255,255,0.06)" />
-                          <text x={M.left - 8} y={y + 4} textAnchor="end" fontSize="11" fill="var(--muted)">
-                            {v}
-                          </text>
-                        </g>
-                      )
-                    })}
-
-                    {/* Barras + valor de frecuencia sobre cada barra */}
-                    {bins.map((b, i) => {
-                      const x = M.left + i * xStep + gap / 2
-                      const h = (b.freq / yMax) * CH
-                      const y = M.top + CH - h
-                      return (
-                        <g key={i}>
-                          <rect x={x} y={y} width={barW} height={h} fill="var(--accent)">
-                            <title>{`Intervalo ${b.label}\nfrecuencia: ${b.freq}`}</title>
-                          </rect>
-                          {/* Frecuencia arriba */}
-                          <text x={x + barW / 2} y={y - 6} textAnchor="middle" fontSize="11">
-                            {b.freq}
-                          </text>
-                        </g>
-                      )
-                    })}
-
-                    {/* Ticks X y rótulos con límites de intervalo */}
-                    {bins.map((b, i) => {
-                      const xTick = M.left + i * xStep + xStep / 2
-                      return (
-                        <g key={`gx-${i}`}>
-                          <line x1={xTick} y1={M.top + CH} x2={xTick} y2={M.top + CH + 6} stroke="var(--border)" />
-                          <text
-                            x={xTick}
-                            y={M.top + CH + 20}
-                            textAnchor="middle"
-                            fontSize="11"
-                            fill="var(--text)"
-                          >
-                            {b.index}
-                          </text>
-                          {/* Límite de intervalo (label completa) debajo, inclinada si es larga */}
-                          <text
-                            x={xTick}
-                            y={M.top + CH + 42}
-                            textAnchor="middle"
-                            fontSize="10"
-                            fill="var(--muted)"
-                            transform={`rotate(-20 ${xTick} ${M.top + CH + 42})`}
-                          >
-                            {b.label}
-                          </text>
-                        </g>
-                      )
-                    })}
-
-                    {/* Etiquetas de ejes */}
-                    <text
-                      x={M.left + CW / 2}
-                      y={H - 10}
-                      textAnchor="middle"
-                      fontSize="12"
-                      fontWeight="600"
-                    >
-                      Intervalo [límites]
-                    </text>
-                    <text
-                      x={14}
-                      y={M.top + CH / 2}
-                      textAnchor="middle"
-                      fontSize="12"
-                      fontWeight="600"
-                      transform={`rotate(-90 14 ${M.top + CH / 2})`}
-                    >
-                      Frecuencia (f)
-                    </text>
-                  </g>
-                )
-              })()}
-            </svg>
-
-            <table style={{ width: '100%', marginTop: '12px', fontSize: '13px' }}>
-              <thead>
-                <tr>
-                  <th>Numero de intervalo</th>
-                  <th>Intervalo</th>
-                  <th>Frecuencia</th>
-                  <th>f/n</th>
-                  <th>F acum</th>
-                  <th>F/n acum</th>
-                </tr>
-              </thead>
-              <tbody>
-                {histogram.bins.map((b) => (
-                  <tr key={b.index}>
-                    <td>{b.index}</td>
-                    <td>{b.label}</td>
-                    <td>{b.freq}</td>
-                    <td>{b.rel.toFixed(4)}</td>
-                    <td>{b.cum}</td>
-                    <td>{b.cum_rel.toFixed(4)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {/* Lista de números */}
+      <div className="results-box" role="region" aria-label="Números generados">
+        {numbers.length === 0 ? (
+          <p className="muted">No hay datos aún.</p>
+        ) : (
+          <ol>
+            {numbers.map((v, i) => <li key={i}><code>{v}</code></li>)}
+          </ol>
         )}
       </div>
-    </section>
-  )
+
+      {/* Histograma + tabla */}
+      {histogram && (
+        <div className="results-box" style={{ marginTop: 16, height: 'auto' }}>
+          <h4>Histograma de frecuencias (k={histogram.k})</h4>
+
+          {/* === SVG del histograma === */}
+          <svg width="100%" viewBox="0 0 860 360" role="img" aria-label={`Histograma con ${histogram.k} intervalos`}>
+            <defs>
+              <filter id="barShadow" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodOpacity="0.25"/>
+              </filter>
+              <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.95"/>
+                <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.8"/>
+              </linearGradient>
+            </defs>
+
+            {(() => {
+              const M = { top: 20, right: 16, bottom: 96, left: 64 }
+              const W = 860, H = 360
+              const CW = W - M.left - M.right
+              const CH = H - M.top - M.bottom
+
+              const bins = histogram.bins
+              const maxF = Math.max(...bins.map(b => b.freq), 1)
+              const yMax = niceMax(maxF)
+              const yTicks = 5
+              const xStep = CW / bins.length
+              const gap = Math.max(4, xStep * 0.16)
+              const barW = xStep - gap
+              const n = bins.reduce((a, b) => a + b.freq, 0)
+
+              return (
+                <g>
+                  <text x={M.left} y={16} fontSize="13" fill="var(--muted)">
+                    {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
+                  </text>
+
+                  <line x1={M.left} y1={M.top} x2={M.left} y2={M.top + CH} stroke="var(--border)" />
+                  <line x1={M.left} y1={M.top + CH} x2={M.left + CW} y2={M.top + CH} stroke="var(--border)" />
+
+                  {Array.from({ length: yTicks + 1 }, (_, i) => {
+                    const v = (yMax / yTicks) * i
+                    const y = M.top + CH - (v / yMax) * CH
+                    return (
+                      <g key={`gy-${i}`}>
+                        <line x1={M.left} y1={y} x2={M.left + CW} y2={y} stroke="rgba(255,255,255,0.06)" />
+                        <text x={M.left - 8} y={y + 4} textAnchor="end" fontSize="11" fill="var(--muted)">{v}</text>
+                      </g>
+                    )
+                  })}
+
+                  {bins.map((b, i) => {
+                    const x = M.left + i * xStep + gap / 2
+                    const h = (b.freq / yMax) * CH
+                    const y = M.top + CH - h
+                    return (
+                      <g key={i}>
+                        <rect
+                          x={x} y={y} width={barW} height={h}
+                          rx="6" ry="6"
+                          fill="url(#barGrad)"
+                          filter="url(#barShadow)"
+                        >
+                          <title>{`Intervalo ${b.label}\nfrecuencia: ${b.freq}`}</title>
+                        </rect>
+                        <text x={x + barW / 2} y={y - 6} textAnchor="middle" fontSize="11">{b.freq}</text>
+                      </g>
+                    )
+                  })}
+
+                  {bins.map((b, i) => {
+                    const xTick = M.left + i * xStep + xStep / 2
+                    return (
+                      <g key={`gx-${i}`}>
+                        <line x1={xTick} y1={M.top + CH} x2={xTick} y2={M.top + CH + 6} stroke="var(--border)" />
+                        <text x={xTick} y={M.top + CH + 20} textAnchor="middle" fontSize="11">{b.index}</text>
+                        <text
+                          x={xTick}
+                          y={M.top + CH + 60}
+                          textAnchor="middle"
+                          fontSize="10"
+                          fill="var(--muted)"
+                          transform={`rotate(-30 ${xTick} ${M.top + CH + 60})`}
+                        >
+                          {b.label}
+                        </text>
+                      </g>
+                    )
+                  })}
+
+                  <text
+                    x={M.left + CW / 2}
+                    y={H - 1}
+                    textAnchor="middle"
+                    fontSize="12"
+                    fontWeight="600"
+                  >
+                    Intervalo [límites]
+                  </text>
+                  <text
+                    x={14}
+                    y={M.top + CH / 2}
+                    textAnchor="middle"
+                    fontSize="12"
+                    fontWeight="600"
+                    transform={`rotate(-90 14 ${M.top + CH / 2})`}
+                  >
+                    Frecuencia (f)
+                  </text>
+                </g>
+              )
+            })()}
+          </svg>
+
+          {/* Tabla del histograma */}
+          <table style={{ width: '100%', marginTop: 12, fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th>Numero de intervalo</th>
+                <th>Intervalo</th>
+                <th>Frecuencia</th>
+                <th>f/n</th>
+                <th>F acum</th>
+                <th>F/n acum</th>
+              </tr>
+            </thead>
+            <tbody>
+              {histogram.bins.map((b) => (
+                <tr key={b.index}>
+                  <td style={{ textAlign:'right' }}>{b.index}</td>
+                  <td>{b.label}</td>
+                  <td style={{ textAlign:'right' }}>{b.freq}</td>
+                  <td style={{ textAlign:'right' }}>{b.rel.toFixed(4)}</td>
+                  <td style={{ textAlign:'right' }}>{b.cum}</td>
+                  <td style={{ textAlign:'right' }}>{b.cum_rel.toFixed(4)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Controles χ² */}
+          <div className="results-actions" style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+            <label className="muted" style={{ display:'flex', alignItems:'center', gap:8 }}>
+              α:
+              <select value={alpha} onChange={(e)=>setAlpha(e.target.value)}>
+                {[0.10, 0.05, 0.01].map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </label>
+            <button type="button" onClick={handleGoF}>Bondad de ajuste (χ²)</button>
+          </div>
+        </div>
+      )}
+
+      {/* Resultado de χ² */}
+      {gof && (
+        <div className="results-box" style={{ marginTop: 12 }}>
+          {gof.error ? (
+            <div className="error">{gof.error}</div>
+          ) : (
+            <>
+              <h4>Prueba χ² de bondad de ajuste</h4>
+              <p><strong>H₀:</strong> {gof.H0}<br/><strong>H₁:</strong> {gof.H1}</p>
+              <p>
+                χ²<span style={{fontSize:'0.9em'}}>obs</span> = <strong>{gof.chi2_obs.toFixed(4)}</strong> · gl = <strong>{gof.df}</strong> ·
+                χ²<span style={{fontSize:'0.9em'}}>crit</span>(1−α={alpha}) = <strong>{gof.chi2_crit.toFixed(4)}</strong> →
+                {gof.reject ? ' Se RECHAZA H₀' : ' No se rechaza H₀'}
+              </p>
+              {gof.warning && <div className="error" style={{marginTop:8}}>{gof.warning}</div>}
+              <table style={{ width:'100%', marginTop:12, fontSize:13 }}>
+                <thead>
+                  <tr>
+                    <th>#</th><th>Intervalo</th><th>pᵢ</th><th>Eᵢ = n·pᵢ</th><th>Oᵢ</th><th>(O−E)²/E</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gof.rows.map(r => (
+                    <tr key={r.index}>
+                      <td style={{textAlign:'right'}}>{r.index}</td>
+                      <td>{r.label}</td>
+                      <td style={{textAlign:'right'}}>{r.p.toFixed(6)}</td>
+                      <td style={{textAlign:'right'}}>{r.expected.toFixed(3)}</td>
+                      <td style={{textAlign:'right'}}>{r.observed}</td>
+                      <td style={{textAlign:'right'}}>{r.contrib.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+)
+
 }

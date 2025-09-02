@@ -191,3 +191,11 @@ body{
 
 svg text { fill: var(--text); }
 svg .muted { fill: var(--muted); }
+
+/* Suavidad al pasar el mouse por las barras */
+svg rect[fill^="url(#barGrad)"]{
+  transition: opacity .15s ease;
+}
+svg rect[fill^="url(#barGrad)"]:hover{
+  opacity: .92;
+}

@@ -12,7 +12,7 @@ export default function App() {
         <DistributionForm />
       </main>
       <footer className="footer">
-        <small>Backend: <code>POST http://localhost:8000/generate</code></small>
+        <small>Grupo 8 - SIM 4K4</small>
       </footer>
     </div>
   )
