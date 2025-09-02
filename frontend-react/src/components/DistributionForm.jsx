@@ -369,9 +369,9 @@ export default function DistributionForm() {
             <table style={{ width: '100%', marginTop: '12px', fontSize: '13px' }}>
               <thead>
                 <tr>
-                  <th>#</th>
+                  <th>Numero de intervalo</th>
                   <th>Intervalo</th>
-                  <th>f</th>
+                  <th>Frecuencia</th>
                   <th>f/n</th>
                   <th>F acum</th>
                   <th>F/n acum</th>
