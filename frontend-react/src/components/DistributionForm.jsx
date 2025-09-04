@@ -396,7 +396,7 @@ return (
           {/* Tabla del histograma */}
          <div
            className="results-box"
-           style={{ minHeight: 680, overflowY: 'auto', marginTop:12, paddingTop:0 }}
+           style={{ minHeight: 420, overflowY: 'auto', marginTop:12, paddingTop:0 }}
            >
           <table style={{ width: '100%', marginTop: 12, fontSize: 13 }}>
             <thead>
