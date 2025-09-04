@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from 'react'
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 
 const API_URL = '/api/generate'
 
@@ -423,9 +425,37 @@ return (
             </tbody>
           </table>
          </div>
+         <div className="actions">
+        <button  onClick={() => exportHistogramToExcel(histogram)} disabled={numbers.length === 0 }>
+            Descargar tabla Excel
+        </button>
+       </div>
         </div>
       )}
     </div>
   </section>
 )
+}
+function exportHistogramToExcel(histogram) {
+  if (!histogram || !histogram.bins) return;
+
+  // Convertimos los bins a un formato de tabla
+  const data = histogram.bins.map((b) => ({
+    "Número de intervalo": b.index,
+    "Intervalo": b.label,
+    "Frecuencia": b.freq,
+    "f/n": b.rel.toFixed(4),
+    "F acum": b.cum,
+    "F/n acum": b.cum_rel.toFixed(4),
+  }));
+
+  // Creamos un workbook y worksheet
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Histograma");
+
+  // Generamos el archivo Excel
+  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([wbout], { type: "application/octet-stream" });
+  saveAs(blob, "histograma.xlsx");
 }
