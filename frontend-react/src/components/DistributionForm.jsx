@@ -306,8 +306,8 @@ return (
               const yMax = niceMax(maxF)
               const yTicks = 5
               const xStep = CW / bins.length
-              const gap = Math.max(4, xStep * 0.16)
-              const barW = xStep - gap
+              const gap = 0
+              const barW = xStep
               const n = bins.reduce((a, b) => a + b.freq, 0)
 
               return (
@@ -394,15 +394,19 @@ return (
           </svg>
 
           {/* Tabla del histograma */}
+         <div
+           className="results-box"
+           style={{ minHeight: 680, overflowY: 'auto', marginTop:12, paddingTop:0 }}
+           >
           <table style={{ width: '100%', marginTop: 12, fontSize: 13 }}>
             <thead>
               <tr>
-                <th>Numero de intervalo</th>
-                <th>Intervalo</th>
-                <th>Frecuencia</th>
-                <th>f/n</th>
-                <th>F acum</th>
-                <th>F/n acum</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Numero de intervalo</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Intervalo</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Frecuencia</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>f/n</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>F acum</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>F/n acum</th>
               </tr>
             </thead>
             <tbody>
@@ -418,60 +422,10 @@ return (
               ))}
             </tbody>
           </table>
-
-          {/* Controles χ² */}
-          <div className="results-actions" style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
-            <label className="muted" style={{ display:'flex', alignItems:'center', gap:8 }}>
-              α:
-              <select value={alpha} onChange={(e)=>setAlpha(e.target.value)}>
-                {[0.10, 0.05, 0.01].map(a => <option key={a} value={a}>{a}</option>)}
-              </select>
-            </label>
-            <button type="button" onClick={handleGoF}>Bondad de ajuste (χ²)</button>
-          </div>
-        </div>
-      )}
-
-      {/* Resultado de χ² */}
-      {gof && (
-        <div className="results-box" style={{ marginTop: 12 }}>
-          {gof.error ? (
-            <div className="error">{gof.error}</div>
-          ) : (
-            <>
-              <h4>Prueba χ² de bondad de ajuste</h4>
-              <p><strong>H₀:</strong> {gof.H0}<br/><strong>H₁:</strong> {gof.H1}</p>
-              <p>
-                χ²<span style={{fontSize:'0.9em'}}>obs</span> = <strong>{gof.chi2_obs.toFixed(4)}</strong> · gl = <strong>{gof.df}</strong> ·
-                χ²<span style={{fontSize:'0.9em'}}>crit</span>(1−α={alpha}) = <strong>{gof.chi2_crit.toFixed(4)}</strong> →
-                {gof.reject ? ' Se RECHAZA H₀' : ' No se rechaza H₀'}
-              </p>
-              {gof.warning && <div className="error" style={{marginTop:8}}>{gof.warning}</div>}
-              <table style={{ width:'100%', marginTop:12, fontSize:13 }}>
-                <thead>
-                  <tr>
-                    <th>#</th><th>Intervalo</th><th>pᵢ</th><th>Eᵢ = n·pᵢ</th><th>Oᵢ</th><th>(O−E)²/E</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {gof.rows.map(r => (
-                    <tr key={r.index}>
-                      <td style={{textAlign:'right'}}>{r.index}</td>
-                      <td>{r.label}</td>
-                      <td style={{textAlign:'right'}}>{r.p.toFixed(6)}</td>
-                      <td style={{textAlign:'right'}}>{r.expected.toFixed(3)}</td>
-                      <td style={{textAlign:'right'}}>{r.observed}</td>
-                      <td style={{textAlign:'right'}}>{r.contrib.toFixed(4)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
+         </div>
         </div>
       )}
     </div>
   </section>
 )
-
 }

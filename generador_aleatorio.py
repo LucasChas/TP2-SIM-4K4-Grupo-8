@@ -162,6 +162,150 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     return 0
 
+# ============================ Goodness of Fit (Chi-Cuadrado) ============================
+from pydantic import BaseModel
+
+def cdf_uniform(A: float, B: float, x: float) -> float:
+    if x <= A: return 0.0
+    if x >= B: return 1.0
+    return (x - A) / (B - A)
+
+def cdf_exponencial(media: float, x: float) -> float:
+    if x <= 0.0: return 0.0
+    lam = 1.0 / media
+    return 1.0 - math.exp(-lam * x)
+
+def cdf_normal(mu: float, sigma: float, x: float) -> float:
+    t = (x - mu) / (sigma * math.sqrt(2.0))
+    return 0.5 * (1.0 + math.erf(t))
+
+# Inversa normal (Φ⁻¹) – aproximación de Acklam (suficiente para α comunes)
+def inv_norm(p: float) -> float:
+    if p <= 0.0 or p >= 1.0:
+        raise ValueError("p debe estar en (0,1)")
+    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
+    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01]
+    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
+    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00]
+    plow = 0.02425
+    phigh = 1 - plow
+    if p < plow:
+        q = math.sqrt(-2*math.log(p))
+        return (((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+               ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1)
+    if phigh < p:
+        q = math.sqrt(-2*math.log(1-p))
+        return -(((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+                 ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1)
+    q = p - 0.5
+    r = q*q
+    return (((((a[0]*r + a[1])*r + a[2])*r + a[3])*r + a[4])*r + a[5])*q / \
+           (((((b[0]*r + b[1])*r + b[2])*r + b[3])*r + b[4])*r + 1)
+
+def chi2_crit(df: int, alpha: float) -> float:
+    # Wilson–Hilferty approx. para F^{-1}(1-α)
+    if df < 1: df = 1
+    z = inv_norm(1.0 - alpha)
+    return df * (1.0 - 2.0/(9.0*df) + z * math.sqrt(2.0/(9.0*df)))**3
+
+class GoFRequest(BaseModel):
+    distribucion: Distribucion
+    params: Dict
+    n: int
+    edges: List[float]
+    observed: List[int]
+    alpha: float = Field(0.05, gt=0, lt=1)
+
+class GoFRow(BaseModel):
+    index: int
+    label: str
+    p: float
+    expected: float
+    observed: int
+    contrib: float
+
+class GoFResponse(BaseModel):
+    H0: str
+    H1: str
+    alpha: float
+    df: int
+    chi2_obs: float
+    chi2_crit: float
+    reject: bool
+    warning: Optional[str] = None
+    rows: List[GoFRow]
+
+@app.post("/gof", response_model=GoFResponse)
+def goodness_of_fit(req: GoFRequest):
+    k = len(req.observed)
+    if len(req.edges) != k + 1:
+        raise HTTPException(status_code=422, detail="edges debe tener k+1 elementos.")
+    if k < 2:
+        raise HTTPException(status_code=422, detail="Se requieren al menos 2 intervalos.")
+
+    # Probabilidades por intervalo según la CDF
+    if req.distribucion == "uniforme":
+        A, B = req.params["A"], req.params["B"]
+        cdf = lambda x: cdf_uniform(A, B, x)
+        p_params = 0   # <-- no estimamos A y B → p = 0
+        H0 = f"Los datos ~ Uniforme[{A:.4f}, {B:.4f}] (parámetros fijados)"
+        H1 = "Los datos NO siguen esa Uniforme."
+    elif req.distribucion == "exponencial":
+        media = req.params["media"]
+        cdf = lambda x: cdf_exponencial(media, x)
+        p_params = 1
+        H0 = f"Los datos ~ Exponencial(media={media:.4f})"
+        H1 = "Los datos NO siguen esa Exponencial."
+    elif req.distribucion == "normal":
+        mu, sigma = req.params["media"], req.params["desviacion"]
+        cdf = lambda x: cdf_normal(mu, sigma, x)
+        p_params = 2
+        H0 = f"Los datos ~ Normal(μ={mu:.4f}, σ={sigma:.4f})"
+        H1 = "Los datos NO siguen esa Normal."
+    else:
+        raise HTTPException(status_code=400, detail="Distribución no soportada.")
+
+    probs = []
+    rows: List[GoFRow] = []
+    warning = None
+    for i in range(k):
+        a, b = req.edges[i], req.edges[i+1]
+        pi = max(0.0, min(1.0, cdf(b) - cdf(a)))
+        probs.append(pi)
+    # Normalizar pequeñas desviaciones numéricas
+    s = sum(probs)
+    if s <= 0:
+        raise HTTPException(status_code=422, detail="Las probabilidades teóricas resultaron 0.")
+    probs = [p/s for p in probs]
+
+    chi2 = 0.0
+    any_small = False
+    for i, (pi, oi) in enumerate(zip(probs, req.observed)):
+        expected = req.n * pi
+        contrib = 0.0 if expected <= 0 else ((oi - expected)**2) / expected
+        chi2 += contrib
+        label = f"[{req.edges[i]:.4f}, {req.edges[i+1]:.4f}" + ("]" if i == k-1 else ")")
+        rows.append(GoFRow(index=i+1, label=label, p=pi, expected=expected, observed=oi, contrib=contrib))
+        if expected < 5.0:
+            any_small = True
+
+    df = max(1, k - 1 - p_params)  # gl = k - 1 - (#parámetros)
+    crit = chi2_crit(df, req.alpha)
+    reject = chi2 > crit
+    if any_small:
+        warning = "Hay intervalos con frecuencia esperada < 5. Considerá reagrupar."
+
+    return GoFResponse(H0=H0, H1=H1, alpha=req.alpha, df=df,
+                       chi2_obs=chi2, chi2_crit=crit, reject=reject,
+                       warning=warning, rows=rows)
+
+
+
+
 
 if __name__ == "__main__":
     try:
