@@ -8,6 +8,12 @@ function isIntegerString(value) {
   return /^-?\d+$/.test(String(value))
 }
 
+// formato: enteros sin decimales; no enteros con 4 decimales
+const fmt = (v) => {
+  const r = Math.round(Number(v) * 10000) / 10000
+  return Number.isInteger(r) ? String(r) : r.toFixed(4)
+}
+
 export default function DistributionForm() {
   const [distribution, setDistribution] = useState('uniforme')
   const [count, setCount] = useState(10)
@@ -110,7 +116,7 @@ export default function DistributionForm() {
   const handleGoF = async () => {
     if (!histogram || numbers.length === 0) return
     try {
-      // Para exponencial, el primer límite inferior del primer intervalo debe ser 0
+      // Para exponencial: primer límite inferior = 0
       const edgesForGof = [...histogram.edges]
       if (distribution === 'exponencial') edgesForGof[0] = 0
 
@@ -304,7 +310,6 @@ export default function DistributionForm() {
               </defs>
 
               {(() => {
-                // Opción A: reservar franja superior para “n · k · fmax”
                 const HEADER_H = 24
                 const M = { top: 20 + HEADER_H, right: 16, bottom: 96, left: 80 }
                 const W = 860, H = 380
@@ -320,9 +325,17 @@ export default function DistributionForm() {
                 const barW = xStep
                 const n = bins.reduce((a, b) => a + b.freq, 0)
 
+                // === NUEVO: etiquetas calculadas desde edges, con 0 para el primer límite si es exponencial ===
+                const edgesForViz = (() => {
+                  const e = [...histogram.edges]
+                  if (distribution === 'exponencial') e[0] = 0
+                  return e
+                })()
+                const labelFor = (i) => `[${fmt(edgesForViz[i])}, ${fmt(edgesForViz[i + 1])}]`
+
                 return (
                   <g>
-                    {/* Leyenda dentro de la franja reservada */}
+                    {/* Leyenda */}
                     <text x={M.left} y={M.top - HEADER_H + 16} fontSize="13" fill="var(--muted)">
                       {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
                     </text>
@@ -345,13 +358,12 @@ export default function DistributionForm() {
                       )
                     })}
 
-                    {/* Barras + etiquetas con “clamp” */}
+                    {/* Barras */}
                     {bins.map((b, i) => {
                       const x = M.left + i * xStep + gap / 2
                       const h = (b.freq / yMax) * CH
                       const y = M.top + CH - h
 
-                      // No dejar que el label invada la franja reservada
                       const labelSafe = M.top + 14
                       const topLabel = y - 6
                       const showInside = topLabel < labelSafe
@@ -366,7 +378,7 @@ export default function DistributionForm() {
                             fill="url(#barGrad)"
                             filter="url(#barShadow)"
                           >
-                            <title>{`Intervalo ${b.label}\nfrecuencia: ${b.freq}`}</title>
+                            <title>{`Intervalo ${b.index} ${labelFor(i)}\nfrecuencia: ${b.freq}`}</title>
                           </rect>
                           <text x={x + barW / 2} y={labelY} textAnchor="middle" fontSize="11" fill={labelFill}>
                             {b.freq}
@@ -390,7 +402,7 @@ export default function DistributionForm() {
                             fill="var(--muted)"
                             transform={`rotate(-30 ${xTick} ${M.top + CH + 60})`}
                           >
-                            {b.label}
+                            {labelFor(i)}
                           </text>
                         </g>
                       )
@@ -421,33 +433,36 @@ export default function DistributionForm() {
               })()}
             </svg>
 
-            {/* Tabla del histograma */}
+            {/* ===================== TABLA SIMPLE PEDIDA ===================== */}
             <div
               className="results-box"
-              style={{ minHeight: 420, overflowY: 'auto', marginTop:12, paddingTop:0 }}
+              style={{ minHeight: 320, overflowY: 'auto', marginTop:12, paddingTop:0 }}
             >
               <table style={{ width: '100%', marginTop: 12, fontSize: 13 }}>
                 <thead>
                   <tr>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Numero de intervalo</th>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Intervalo</th>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Frecuencia</th>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>f/n</th>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>F acum</th>
-                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>F/n acum</th>
+                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Intervalo Numero</th>
+                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Limite Inferior</th>
+                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Limite superior</th>
+                    <th style={{ position: 'sticky', top: 0, zIndex: 2 }}>Frecuencia observada</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {histogram.bins.map((b) => (
-                    <tr key={b.index}>
-                      <td style={{ textAlign:'right' }}>{b.index}</td>
-                      <td>{b.label}</td>
-                      <td style={{ textAlign:'right' }}>{b.freq}</td>
-                      <td style={{ textAlign:'right' }}>{b.rel.toFixed(4)}</td>
-                      <td style={{ textAlign:'right' }}>{b.cum}</td>
-                      <td style={{ textAlign:'right' }}>{b.cum_rel.toFixed(4)}</td>
-                    </tr>
-                  ))}
+                  {histogram.bins.map((b, i) => {
+                    // Para exponencial: el 1er límite inferior debe iniciar en 0
+                    const lower = (distribution === 'exponencial' && i === 0)
+                      ? 0
+                      : histogram.edges[i]
+                    const upper = histogram.edges[i + 1]
+                    return (
+                      <tr key={b.index}>
+                        <td style={{ textAlign:'right' }}>{b.index}</td>
+                        <td style={{ textAlign:'right' }}>{fmt(lower)}</td>
+                        <td style={{ textAlign:'right' }}>{fmt(upper)}</td>
+                        <td style={{ textAlign:'right' }}>{b.freq}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -456,7 +471,6 @@ export default function DistributionForm() {
               <button onClick={() => exportHistogramToExcel(histogram, distribution)} disabled={numbers.length === 0}>
                 Descargar tabla Excel
               </button>
-              {/* Si querés usar χ² desde el front, descomentá: */}
               {/* <button onClick={handleGoF} disabled={numbers.length === 0}>Calcular χ²</button> */}
             </div>
 
@@ -483,17 +497,25 @@ export default function DistributionForm() {
   )
 }
 
-function exportHistogramToExcel(histogram) {
+function exportHistogramToExcel(histogram, distribution) {
   if (!histogram || !histogram.bins) return;
 
-  const data = histogram.bins.map((b) => ({
-    "Número de intervalo": b.index,
-    "Intervalo": b.label,
-    "Frecuencia": b.freq,
-    "f/n": b.rel.toFixed(4),
-    "F acum": b.cum,
-    "F/n acum": b.cum_rel.toFixed(4),
-  }));
+  const data = histogram.bins.map((b, i) => {
+    const lower = (distribution === 'exponencial' && i === 0)
+      ? 0
+      : histogram.edges[i]
+    const upper = histogram.edges[i + 1]
+    const fmtCell = (v) => {
+      const r = Math.round(Number(v) * 10000) / 10000
+      return Number.isInteger(r) ? String(r) : r.toFixed(4)
+    }
+    return {
+      "Intervalo Numero": b.index,
+      "Limite Inferior": fmtCell(lower),
+      "Limite superior": fmtCell(upper),
+      "Frecuencia observada": b.freq,
+    }
+  });
 
   const ws = XLSX.utils.json_to_sheet(data);
   const wb = XLSX.utils.book_new();
@@ -503,4 +525,3 @@ function exportHistogramToExcel(histogram) {
   const blob = new Blob([wbout], { type: "application/octet-stream" });
   saveAs(blob, "histograma.xlsx");
 }
-
