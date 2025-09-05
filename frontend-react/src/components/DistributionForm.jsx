@@ -110,6 +110,10 @@ export default function DistributionForm() {
   const handleGoF = async () => {
     if (!histogram || numbers.length === 0) return
     try {
+      // Para exponencial, el primer límite inferior del primer intervalo debe ser 0
+      const edgesForGof = [...histogram.edges]
+      if (distribution === 'exponencial') edgesForGof[0] = 0
+
       const payload = {
         distribucion: distribution,
         params: showUniforme
@@ -118,7 +122,7 @@ export default function DistributionForm() {
           ? { media: Number(params.media) }
           : { media: Number(params.media), desviacion: Number(params.desviacion) },
         n: Number(count),
-        edges: histogram.edges,
+        edges: edgesForGof,
         observed: histogram.bins.map(b => b.freq),
         alpha: Number(alpha)
       }
@@ -449,10 +453,29 @@ export default function DistributionForm() {
             </div>
 
             <div className="actions">
-              <button onClick={() => exportHistogramToExcel(histogram)} disabled={numbers.length === 0 }>
+              <button onClick={() => exportHistogramToExcel(histogram, distribution)} disabled={numbers.length === 0}>
                 Descargar tabla Excel
               </button>
+              {/* Si querés usar χ² desde el front, descomentá: */}
+              {/* <button onClick={handleGoF} disabled={numbers.length === 0}>Calcular χ²</button> */}
             </div>
+
+            {/* Resultado χ² (opcional) */}
+            {gof && (
+              <div className="results-box" style={{ marginTop: 16 }}>
+                {gof.error ? (
+                  <div className="error">{gof.error}</div>
+                ) : (
+                  <div className="gof">
+                    <h4>Bondad de ajuste χ²</h4>
+                    <p>χ² observado: <strong>{gof?.chi2?.toFixed?.(4) ?? gof.chi2}</strong></p>
+                    <p>χ² crítico (α={alpha}): <strong>{gof?.critical?.toFixed?.(4) ?? gof.critical}</strong></p>
+                    <p>Grados de libertad: <strong>{gof?.df}</strong></p>
+                    <p>Decisión: <strong>{gof?.reject ? 'Rechazar H₀' : 'No rechazar H₀'}</strong></p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -480,3 +503,4 @@ function exportHistogramToExcel(histogram) {
   const blob = new Blob([wbout], { type: "application/octet-stream" });
   saveAs(blob, "histograma.xlsx");
 }
+
