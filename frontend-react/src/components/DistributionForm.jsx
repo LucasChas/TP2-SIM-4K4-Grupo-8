@@ -505,10 +505,13 @@ function exportHistogramToExcel(histogram, distribution) {
       ? 0
       : histogram.edges[i]
     const upper = histogram.edges[i + 1]
+
     const fmtCell = (v) => {
       const r = Math.round(Number(v) * 10000) / 10000
-      return Number.isInteger(r) ? String(r) : r.toFixed(4)
+      const str = Number.isInteger(r) ? String(r) : r.toFixed(4)
+      return str.replace('.', ',') // <-- cambio clave
     }
+
     return {
       "Intervalo Numero": b.index,
       "Limite Inferior": fmtCell(lower),
@@ -523,5 +526,6 @@ function exportHistogramToExcel(histogram, distribution) {
 
   const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
   const blob = new Blob([wbout], { type: "application/octet-stream" });
-  saveAs(blob, "histograma.xlsx");
+  saveAs(blob, "Grupo8-Tabla.xlsx");
 }
+

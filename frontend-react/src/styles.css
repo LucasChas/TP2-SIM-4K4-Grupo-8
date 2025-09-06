@@ -79,6 +79,15 @@ body{
   grid-column: 1 / -1;
 }
 
+.form-row {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.grid-2 .form-row {
+  height: 100%;
+}
 .actions{
   margin-top: 8px;
 }
