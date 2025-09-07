@@ -30,22 +30,29 @@ export default function DistributionForm() {
   const [alpha, setAlpha] = useState(0.05)
   const [gof, setGof] = useState(null)
 
+  function isValidNumber(v) {
+  if (v === '' || v === null || v === undefined) return false
+  const num = Number(v)
+  return !isNaN(num) && isFinite(num)
+}
+
+
   const canSubmit = useMemo(() => {
     if (!isIntegerString(count) || Number(count) < 1 || Number(count) > 1000000) return false
     if (showUniforme) {
       const { A, B } = params
-      if (A === '' || B === '') return false
+      if (!isValidNumber(A) || !isValidNumber(B)) return false
       if (Number(A) >= Number(B)) return false
       return true
     }
     if (showExponencial) {
       const { media } = params
-      if (media === '' || Number(media) <= 0) return false
+      if (!isValidNumber(media) || Number(media) <= 0) return false
       return true
     }
     if (showNormal) {
       const { media, desviacion } = params
-      if (media === '' || desviacion === '') return false
+      if (!isValidNumber(media) || !isValidNumber(desviacion)) return false
       if (Number(desviacion) <= 0) return false
       return true
     }
@@ -198,9 +205,10 @@ const niceMax = (v) => {
             <label htmlFor="A">A (límite inferior)</label>
             <input
               id="A"
-              type="number"
-              value={params.A}
-              onChange={(e) => setParams({ ...params, A: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              value={params.A?.toString().replace('.', ',')}
+              onChange={(e) => setParams({ ...params, A: e.target.value.replace(',', '.') })}
               required
             />
           </div>
@@ -208,9 +216,10 @@ const niceMax = (v) => {
             <label htmlFor="B">B (límite superior)</label>
             <input
               id="B"
-              type="number"
-              value={params.B}
-              onChange={(e) => setParams({ ...params, B: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              value={params.B?.toString().replace('.', ',')}
+              onChange={(e) => setParams({ ...params, B: e.target.value.replace(',', '.') })}
               required
             />
           </div>
@@ -225,11 +234,12 @@ const niceMax = (v) => {
           <label htmlFor="media-exp">Media</label>
           <input
             id="media-exp"
-            type="number"
+            type="text"
+            inputMode="decimal"
             min="0"
             step="any"
-            value={params.media}
-            onChange={(e) => setParams({ ...params, media: e.target.value })}
+            value={params.media?.toString().replace('.', ',')}
+            onChange={(e) => setParams({ ...params, media: e.target.value.replace(',', '.') })}
             required
           />
           <small>Debe ser &gt; 0</small>
@@ -242,10 +252,11 @@ const niceMax = (v) => {
             <label htmlFor="media-norm">Media (μ)</label>
             <input
               id="media-norm"
-              type="number"
+              type="text"
+              inputMode="decimal"
               step="any"
-              value={params.media}
-              onChange={(e) => setParams({ ...params, media: e.target.value })}
+              value={params.media?.toString().replace('.', ',')}
+              onChange={(e) => setParams({ ...params, media: e.target.value.replace(',', '.') })}
               required
             />
           </div>
@@ -253,11 +264,12 @@ const niceMax = (v) => {
             <label htmlFor="desv">Desviación (σ)</label>
             <input
               id="desv"
-              type="number"
+              type="text"
+              inputMode="decimal"
               min="0"
               step="any"
-              value={params.desviacion}
-              onChange={(e) => setParams({ ...params, desviacion: e.target.value })}
+              value={params.desviacion?.toString().replace('.', ',')}
+              onChange={(e) => setParams({ ...params, desviacion: e.target.value.replace(',', '.') })}
               required
             />
             <small>Debe ser &gt; 0</small>
@@ -336,16 +348,54 @@ const niceMax = (v) => {
               })()
               const labelFor = (i) => `[${fmt(edgesForViz[i])}, ${fmt(edgesForViz[i + 1])}]`
 
-              // mapeo valor real -> X dentro del “content area”
-              const xFromValue = (v) =>
-                contentLeft +
-                ((v - edgesForViz[0]) /
-                  (edgesForViz[edgesForViz.length - 1] - edgesForViz[0])) *
-                  contentWidth
+              // === NUEVO: rango real de datos + margen y ticks de X ===
+              const dataMin = numbers.length
+                ? Math.min(...numbers)
+                : edgesForViz[0]
+              const dataMax = numbers.length
+                ? Math.max(...numbers)
+                : edgesForViz[edgesForViz.length - 1]
 
-              // eje Y dinámico: si el rango cruza 0 => eje en x=0; si no => borde izq. del content
-              const crossesZero = edgesForViz[0] < 0 && edgesForViz[edgesForViz.length - 1] > 0
-              const yAxisX = crossesZero ? xFromValue(0) : contentLeft
+              const span = edgesForViz[edgesForViz.length - 1] - edgesForViz[0]
+              const pad = span * 0.1 || 1
+
+              let xMin = edgesForViz[0] - pad
+              let xMax = edgesForViz[edgesForViz.length - 1] + pad
+
+              // forzar a incluir el 0 en el rango
+              if (xMin > 0) xMin = 0
+              if (xMax < 0) xMax = 0
+
+
+              // paso "lindo" (…, 0.1, 0.2, 0.5, 1, 2, 5, 10, …)
+              const niceTickStep = (rng) => {
+                const p = Math.pow(10, Math.floor(Math.log10(rng)))
+                const d = rng / p
+                let u
+                if (d <= 1) u = 0.1
+                else if (d <= 2) u = 0.2
+                else if (d <= 5) u = 0.5
+                else u = 1
+                return u * p
+              }
+              const tickStep = niceTickStep(xMax - xMin)
+
+              // mapeo valor real -> X dentro del “content area”
+              // mapeo valor real -> X en el área de contenido usando xMin/xMax (no edges)
+              const xFromValue = (v) =>
+                contentLeft + ((v - xMin) / (xMax - xMin)) * contentWidth
+
+
+              // eje Y: si el rango cruza 0 => eje en x=0; si no => borde izq. del content
+              const crossesZero = xMin < 0 && xMax > 0
+              const yAxisX = xFromValue(0)
+
+              // ticks de X (numéricos, no por intervalos)
+              const xTicks = []
+              const startTick = Math.ceil(xMin / tickStep) * tickStep
+              for (let t = startTick; t <= xMax + 1e-9; t += tickStep) {
+                xTicks.push(Number(t.toFixed(10))) // evita ruido flotante
+              }
 
               // escalas X (en content area)
               const xStep = contentWidth / bins.length
@@ -358,15 +408,15 @@ const niceMax = (v) => {
                   <text x={M.left} y={M.top - HEADER_H + 16} fontSize="13" fill="var(--muted)">
                     {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
                   </text>
-
-                  {/* Ejes */}
                   
                   
                   {/* X solo bajo el área de contenido */}
                   <line
-                    x1={contentLeft} y1={M.top + CH} x2={contentLeft + contentWidth} y2={M.top + CH}
-                    stroke="var(--border)" strokeWidth="1.5"
-                  />
+                  x1={xFromValue(xMin)} y1={M.top + CH}
+                  x2={xFromValue(xMax)} y2={M.top + CH}
+                  stroke="var(--border)" strokeWidth="1.5"
+                />
+
                   {/* Si cruza 0: guía marcada y rótulo "0" */}
                   {crossesZero && (
                     <>
@@ -374,12 +424,7 @@ const niceMax = (v) => {
                         x1={yAxisX} y1={M.top} x2={yAxisX} y2={M.top + CH}
                         stroke="rgba(255,255,255,0.18)" strokeWidth="3" strokeDasharray="4 6"
                       />
-                      <text
-                        x={yAxisX} y={M.top + CH + 18}
-                        textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--muted)"
-                      >
-                        0
-                      </text>
+                    
                     </>
                   )}
 
@@ -399,7 +444,10 @@ const niceMax = (v) => {
 
                   {/* Barras */}
                   {bins.map((b, i) => {
-                    const x = contentLeft + i * xStep + gap / 2
+                    const x0 = xFromValue(edgesForViz[i])
+                    const x1 = xFromValue(edgesForViz[i + 1])
+                    const barW = x1 - x0
+                    const x = x0
                     const h = (b.freq / yMax) * CH
                     const y = M.top + CH - h
 
@@ -427,6 +475,7 @@ const niceMax = (v) => {
                       </g>
                     )
                   })}
+
                   {/* Eje Y y marca de 0 SOBRE las barras */}
                     <g className="axes-top" pointerEvents="none">
                         <line
@@ -442,12 +491,7 @@ const niceMax = (v) => {
                               stroke="rgba(255,255,255,0.18)"
                               strokeWidth="3" strokeDasharray="4 6"
                             />
-                            <text
-                              x={yAxisX} y={M.top + CH + 18}
-                              textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--muted)"
-                            >
-                              0
-                            </text>
+                            
                           </>
                         )}
 
@@ -472,10 +516,11 @@ const niceMax = (v) => {
               </g>
                   {/* Ticks/labels X (solo intervalos; sin 1..k) */}
                   {bins.map((b, i) => {
-                    const xTick = contentLeft + i * xStep + xStep / 2
+                    const x0 = xFromValue(edgesForViz[i])
+                    const x1 = xFromValue(edgesForViz[i + 1])
+                    const xTick = (x0 + x1) / 2  // centro del intervalo real
                     return (
                       <g key={`gx-${i}`}>
-                        <line x1={xTick} y1={M.top + CH} x2={xTick} y2={M.top + CH + 6} stroke="var(--border)" />
                         <text
                           x={xTick}
                           y={M.top + CH + 60}
@@ -485,6 +530,30 @@ const niceMax = (v) => {
                           transform={`rotate(-30 ${xTick} ${M.top + CH + 60})`}
                         >
                           {labelFor(i)}
+                        </text>
+                      </g>
+                    )
+                  })}
+
+                  {/* Ticks/labels X adicionales (escala numérica global) */}
+                  {xTicks.map((v, i) => {
+                    const xTick = xFromValue(v)
+                    return (
+                      <g key={`gx-num-${i}`}>
+                        <line
+                          x1={xTick} y1={M.top + CH}
+                          x2={xTick} y2={M.top + CH + 10} // un poquito más largos para distinguirlos
+                          stroke="var(--border)"
+                        />
+                        <text
+                          x={xTick}
+                          y={M.top + CH + 25}
+                          textAnchor="middle"
+                          fontSize="11"
+                          fontWeight="600"
+                          fill="var(--muted)"
+                        >
+                          {formatTick(v)}
                         </text>
                       </g>
                     )
