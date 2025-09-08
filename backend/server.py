@@ -35,11 +35,11 @@ app.add_middleware(
 
 def format_es(x: float) -> str:
     # Hasta 4 decimales, sin ceros a la derecha, con coma; siempre al menos 1 decimal
-    s = f"{x:.4f}"          # "1.9000"
-    s = s.rstrip('0')       # "1.9" o "1."
-    if s.endswith('.'):     # evitar "1."
-        s += '0'            # -> "1.0"
-    s = s.replace('.', ',') # "1,9"
+    s = f"{x:.4f}"          
+    s = s.rstrip('0')       
+    if s.endswith('.'):     
+        s += '0'            
+    s = s.replace('.', ',') 
     return s
 
 Distribucion = Literal["uniforme", "exponencial", "normal"]
@@ -141,10 +141,6 @@ def gen_normal(mu: float, sigma: float, n: int) -> Iterator[float]:
 
 # -------------------------- Histograma / Tabla de frecuencias --------------------------
 def build_histogram(values: List[float], k: int) -> Dict[str, Any]:
-    """
-    Construye un histograma con k intervalos: [a0,a1), [a1,a2), ... [a_{k-1}, a_k]
-    (último intervalo cerrado a derecha). Devuelve bins, edges y metadatos.
-    """
     if k not in {5, 10, 15, 20, 25}:
         raise HTTPException(status_code=422, detail="k_intervals debe ser 5, 10, 15, 20 o 25.")
 
@@ -242,13 +238,13 @@ def generate(req: GenerateRequest):
     else:
         raise HTTPException(status_code=400, detail="Distribución no soportada.")
 
-    # 1) Genero la serie en float (sirve para histogramar)
+    # 1) Genero la serie en float
     values = list(generator)
 
-    # 2) Formateo a 4 decimales como strings (para mostrar la serie)
+    # 2) Formateo a 4 decimales como strings
     numeros = [format_es(x) for x in values]
 
-    # 3) (Opcional) Histograma
+    # 3) Histograma
     histogram = None
     if req.k_intervals is not None:
         histogram = build_histogram(values, req.k_intervals)

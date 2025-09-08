@@ -385,12 +385,10 @@ const niceMax = (v) => {
               const xFromValue = (v) =>
                 contentLeft + ((v - xMin) / (xMax - xMin)) * contentWidth
 
-
-              // eje Y: si el rango cruza 0 => eje en x=0; si no => borde izq. del content
               const crossesZero = xMin < 0 && xMax > 0
               const yAxisX = xFromValue(0)
 
-              // ticks de X (numéricos, no por intervalos)
+              // ticks de X
               const xTicks = []
               const startTick = Math.ceil(xMin / tickStep) * tickStep
               for (let t = startTick; t <= xMax + 1e-9; t += tickStep) {
@@ -495,9 +493,9 @@ const niceMax = (v) => {
                           </>
                         )}
 
-                {/* NUEVO: labels de Y por encima del histograma */}
+                {/* labels de Y por encima del histograma */}
                 {Array.from({ length: yTicks + 1 }, (_, i) => {
-                  if (i === 0) return null;            // evitamos duplicar el "0" (ya lo marcamos abajo)
+                  if (i === 0) return null;
                   const v = (yMax / yTicks) * i
                   const y = M.top + CH - (v / yMax) * CH
                   return (
@@ -518,7 +516,7 @@ const niceMax = (v) => {
                   {bins.map((b, i) => {
                     const x0 = xFromValue(edgesForViz[i])
                     const x1 = xFromValue(edgesForViz[i + 1])
-                    const xTick = (x0 + x1) / 2  // centro del intervalo real
+                    const xTick = (x0 + x1) / 2
                     return (
                       <g key={`gx-${i}`}>
                         <text
@@ -542,7 +540,7 @@ const niceMax = (v) => {
                       <g key={`gx-num-${i}`}>
                         <line
                           x1={xTick} y1={M.top + CH}
-                          x2={xTick} y2={M.top + CH + 10} // un poquito más largos para distinguirlos
+                          x2={xTick} y2={M.top + CH + 10} 
                           stroke="var(--border)"
                         />
                         <text
@@ -600,7 +598,6 @@ const niceMax = (v) => {
               </thead>
               <tbody>
                 {histogram.bins.map((b, i) => {
-                  // Para exponencial: el 1er límite inferior debe iniciar en 0
                   const lower = (distribution === 'exponencial' && i === 0)
                     ? 0
                     : histogram.edges[i]
@@ -622,25 +619,7 @@ const niceMax = (v) => {
             <button onClick={() => exportHistogramToExcel(histogram, distribution)} disabled={numbers.length === 0}>
               Descargar tabla Excel
             </button>
-            {/* <button onClick={handleGoF} disabled={numbers.length === 0}>Calcular χ²</button> */}
           </div>
-
-          {/* Resultado χ² (opcional) */}
-          {gof && (
-            <div className="results-box" style={{ marginTop: 16 }}>
-              {gof.error ? (
-                <div className="error">{gof.error}</div>
-              ) : (
-                <div className="gof">
-                  <h4>Bondad de ajuste χ²</h4>
-                  <p>χ² observado: <strong>{gof?.chi2?.toFixed?.(4) ?? gof.chi2}</strong></p>
-                  <p>χ² crítico (α={alpha}): <strong>{gof?.critical?.toFixed?.(4) ?? gof.critical}</strong></p>
-                  <p>Grados de libertad: <strong>{gof?.df}</strong></p>
-                  <p>Decisión: <strong>{gof?.reject ? 'Rechazar H₀' : 'No rechazar H₀'}</strong></p>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -661,7 +640,7 @@ function exportHistogramToExcel(histogram, distribution) {
     const fmtCell = (v) => {
       const r = Math.round(Number(v) * 10000) / 10000
       const str = Number.isInteger(r) ? String(r) : r.toFixed(4)
-      return str.replace('.', ',') // <-- cambio clave
+      return str.replace('.', ',') 
     }
 
     return {
