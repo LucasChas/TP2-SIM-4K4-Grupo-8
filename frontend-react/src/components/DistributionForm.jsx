@@ -1,8 +1,11 @@
 import React, { useMemo, useState } from 'react'
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import { FixedSizeList as List } from 'react-window'
+import InfiniteLoader from 'react-window-infinite-loader';
 
-const API_URL = '/api/generate'
+
+const API_URL = '/api/generate';
 
 function isIntegerString(value) {
   return /^-?\d+$/.test(String(value))
@@ -23,12 +26,58 @@ export default function DistributionForm() {
   const [error, setError] = useState('')
   const [numbers, setNumbers] = useState([])
   const [histogram, setHistogram] = useState(null)
+  const [isNextPageLoading, setIsNextPageLoading] = useState(false);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   const showUniforme = distribution === 'uniforme'
   const showExponencial = distribution === 'exponencial'
   const showNormal = distribution === 'normal'
   const [alpha, setAlpha] = useState(0.05)
   const [gof, setGof] = useState(null)
+
+  // 👈  3. Esta función maneja la carga de más números
+  const loadMoreItems = async (startIndex, stopIndex) => {
+    if (isNextPageLoading || !hasNextPage) {
+        return;
+    }
+    setIsNextPageLoading(true);
+
+    try {
+        const payload = {
+            distribucion: distribution,
+            n: Number(count),
+            seed: null, // Si usas semilla, pásala aquí
+            params: showUniforme
+                ? { A: Number(params.A), B: Number(params.B) }
+                : showExponencial
+                ? { media: Number(params.media) }
+                : { media: Number(params.media), desviacion: Number(params.desviacion) },
+            skip: startIndex, // El offset para la paginación
+            limit: 1000 // Tamaño de la página
+        };
+
+        const res = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+
+        setNumbers(prevNumbers => {
+            const newNumbers = [...prevNumbers, ...data.numbers];
+            if (newNumbers.length >= Number(count)) {
+                setHasNextPage(false);
+            }
+            return newNumbers;
+        });
+
+    } catch (err) {
+        setError("Error al cargar más datos. Revisa la consola.");
+        console.error("Error al cargar más elementos:", err);
+    } finally {
+        setIsNextPageLoading(false);
+    }
+  };
 
   function isValidNumber(v) {
   if (v === '' || v === null || v === undefined) return false
@@ -60,41 +109,82 @@ export default function DistributionForm() {
   }, [count, params, showUniforme, showExponencial, showNormal])
 
   const handleSubmit = async (e) => {
-    e.preventDefault()
-    if (!canSubmit) return
-    setLoading(true)
-    setError('')
-    setNumbers([])
-    setHistogram(null)
+    e.preventDefault();
+    if (!canSubmit) return;
+    setLoading(true);
+    setError('');
+    setNumbers([]);
+    setHistogram(null);
+    setHasNextPage(true);
+
+    const HISTOGRAM_API_URL = '/api/histogram';
+
     try {
-      const payload = {
-        distribucion: distribution,
-        n: Number(count),
-        params: showUniforme
-          ? { A: Number(params.A), B: Number(params.B) }
-          : showExponencial
-          ? { media: Number(params.media) }
-          : { media: Number(params.media), desviacion: Number(params.desviacion) },
-        k_intervals: Number(intervals)
-      }
-      const res = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      if (!res.ok) {
-        const info = await res.json().catch(() => ({}))
-        throw new Error(info?.detail || 'Error al generar')
-      }
-      const data = await res.json()
-      setNumbers(data.numbers || [])
-      setHistogram(data.histogram || null)
+        // Base payload con los parámetros comunes
+        const basePayload = {
+            distribucion: distribution,
+            n: Number(count),
+            seed: null, // Agrega la semilla si la usas
+            params: showUniforme
+                ? { A: Number(params.A), B: Number(params.B) }
+                : showExponencial
+                ? { media: Number(params.media) }
+                : { media: Number(params.media), desviacion: Number(params.desviacion) },
+        };
+
+        // Payload para la paginación de números
+        // Este payload no debe incluir 'k_intervals'
+        const numbersPayload = {
+            ...basePayload,
+            skip: 0,
+            limit: 100000, // O el tamaño de página que prefieras
+        };
+
+        // Payload para el histograma
+        // Este payload sí debe incluir 'k_intervals', pero no 'skip' ni 'limit'
+        const histogramPayload = {
+            ...basePayload,
+            k_intervals: Number(intervals),
+        };
+
+        // Hacemos ambas llamadas en paralelo para optimizar la carga
+        const [numbersRes, histogramRes] = await Promise.all([
+            fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(numbersPayload),
+            }),
+            fetch(HISTOGRAM_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(histogramPayload),
+            }),
+        ]);
+
+        if (!numbersRes.ok || !histogramRes.ok) {
+            const numbersInfo = await numbersRes.json().catch(() => ({}));
+            const histogramInfo = await histogramRes.json().catch(() => ({}));
+            throw new Error(numbersInfo?.detail || histogramInfo?.detail || 'Error al generar los datos.');
+        }
+
+        const numbersData = await numbersRes.json();
+        const histogramData = await histogramRes.json();
+
+        setNumbers(numbersData.numbers || []);
+        setHistogram(histogramData || null);
+        setHasNextPage(numbersData.numbers.length === 100000 && Number(count) > 100000);
+
     } catch (err) {
-      setError(err.message)
+        setError(err.message);
     } finally {
-      setLoading(false)
+        setLoading(false);
     }
-  }
+};
+
+  const isItemLoaded = (index) => {
+    // Retorna true si el índice es menor que el número de elementos cargados.
+    return index < numbers.length;
+};
 
   const handleCopy = async () => {
     try {
@@ -294,14 +384,32 @@ const niceMax = (v) => {
         </div>
       </div>
 
-      {/* Lista de números */}
       <div className="results-box" role="region" aria-label="Números generados">
-        {numbers.length === 0 ? (
-          <p className="muted">No hay datos aún.</p>
-        ) : (
-          <ol>
-            {numbers.map((v, i) => <li key={i}><code>{v}</code></li>)}
-          </ol>
+    {numbers.length === 0 ? (
+        <p className="muted">No hay datos aún.</p>
+    ) : (
+        <InfiniteLoader
+            isItemLoaded={isItemLoaded}
+            itemCount={Number(count)} // Clave: la cantidad total de elementos a cargar
+            loadMoreItems={loadMoreItems}
+        >
+            {({ onItemsRendered, ref }) => (
+                <List
+                    height={400}
+                    itemCount={numbers.length} // Se basa en los elementos ya cargados
+                    itemSize={24}
+                    width="100%"
+                    onItemsRendered={onItemsRendered}
+                    ref={ref}
+                >
+                    {({ index, style }) => (
+                        <div style={style}>
+                            <code>{numbers[index]}</code>
+                        </div>
+                    )}
+                </List>
+            )}
+        </InfiniteLoader>
         )}
       </div>
 

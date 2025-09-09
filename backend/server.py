@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Optional, List, Dict, Iterator, Any
 import random
 import math
+from itertools import islice
 
 app = FastAPI(title="Generador Aleatorio", version="1.1.0")
 
@@ -74,7 +75,9 @@ class GenerateRequest(BaseModel):
         None,
         description="Cantidad de intervalos para el histograma (5, 10, 15, 20 o 25)"
     )
-
+    # Nuevos parámetros para paginación
+    skip: int = Field(0, description="Índice de inicio para la generación (offset).")
+    limit: int = Field(100000, le=100000, description="Cantidad de valores a devolver en esta llamada (límite).")
 
 class HistogramBin(BaseModel):
     index: int
@@ -86,6 +89,16 @@ class HistogramBin(BaseModel):
     cum: int         # frecuencia acumulada
     cum_rel: float   # frecuencia relativa acumulada
 
+class HistogramResponse(BaseModel):
+    bins: List[HistogramBin] = Field(..., min_length=1)
+    edges: List[float]
+
+class HistogramRequest(BaseModel):
+    distribucion: Distribucion
+    n: int
+    seed: Optional[int]
+    params: Dict
+    k_intervals: int
 
 class GenerateResponse(BaseModel):
     distribucion: Distribucion
@@ -209,6 +222,7 @@ def generate(req: GenerateRequest):
 
     dist = req.distribucion
     n = req.n
+    generator = None
 
     # Validar y normalizar parámetros
     if dist == "uniforme":
@@ -238,16 +252,17 @@ def generate(req: GenerateRequest):
     else:
         raise HTTPException(status_code=400, detail="Distribución no soportada.")
 
-    # 1) Genero la serie en float
-    values = list(generator)
+    # 1. Obtiene un iterador del generador completo
+    full_generator = generator
 
+    # 2. Usa islice para obtener solo el segmento paginado de números
+    paginated_values = islice(full_generator, req.skip, req.skip + req.limit)
+    
+    # 3. Convierte el iterador en una lista
+    values = list(paginated_values)
+    
     # 2) Formateo a 4 decimales como strings
     numeros = [format_es(x) for x in values]
-
-    # 3) Histograma
-    histogram = None
-    if req.k_intervals is not None:
-        histogram = build_histogram(values, req.k_intervals)
 
     return GenerateResponse(
         distribucion=dist,
@@ -255,8 +270,58 @@ def generate(req: GenerateRequest):
         params=params_publicos,
         format="fixed4",
         numbers=numeros,
-        histogram=histogram
+        histogram=None
     )
+
+@app.post("/histogram", response_model=HistogramResponse)
+def get_histogram(req: HistogramRequest):
+    """
+    Genera una serie completa de números y calcula el histograma.
+    Este endpoint se usa para obtener el histograma, ya que requiere
+    todos los datos para ser preciso.
+    """
+    if req.seed is not None:
+        random.seed(req.seed)
+
+    dist = req.distribucion
+    generator = None
+    
+    # 1. Obtenemos el generador según la distribución solicitada
+    if dist == "uniforme":
+        try:
+            p = UniformeParams(**req.params)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Parámetros de distribución uniforme inválidos: {e}")
+        generator = gen_uniforme(p.A, p.B, req.n)
+
+    elif dist == "exponencial":
+        try:
+            p = ExponencialParams(**req.params)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Parámetros de distribución exponencial inválidos: {e}")
+        generator = gen_exponencial(p.media, req.n)
+
+    elif dist == "normal":
+        try:
+            p = NormalParams(**req.params)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Parámetros de distribución normal inválidos: {e}")
+        generator = gen_normal(p.media, p.desviacion, req.n)
+
+    else:
+        raise HTTPException(status_code=400, detail="Distribución no soportada.")
+    
+    # 2. Generamos la serie completa de números.
+    #    Esto puede tomar tiempo si 'n' es muy grande.
+    values = [next(generator) for _ in range(req.n)]
+    
+    # 3. Construimos el histograma.
+    histogram = build_histogram(values, req.k_intervals)
+    
+    # 4. Devolvemos el resultado.
+    return histogram
+
+
 
 @app.get("/", tags=["health"])
 def root():

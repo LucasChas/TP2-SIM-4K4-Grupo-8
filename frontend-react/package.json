@@ -12,6 +12,8 @@
     "file-saver": "^2.0.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-window": "^1.8.10",
+    "react-window-infinite-loader": "^1.0.10",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
