@@ -433,11 +433,10 @@ export default function DistributionForm() {
         <div className="results-header">
           <h3>Resultados</h3>
           <div className="results-actions">
-            <button onClick={handleCopy} disabled={numbers.length === 0}>Copiar</button>
             {/* Exportar TXT: solo aparece cuando hay datos */}
             {numbers.length > 0 && (
             <button onClick={exportAllNumbersToTxt} disabled={exporting || loading}>
-              {exporting ? 'Exportando…' : 'Exportar TXT (todos)'}
+              {exporting ? 'Exportando…' : 'Exportar TXT'}
           </button>
          )}
           </div>
