@@ -168,8 +168,9 @@ export default function DistributionForm() {
       const numbersData = await numbersRes.json();
       const histogramData = await histogramRes.json();
 
-      setNumbers(numbersData.numbers || []);
-      setHistogram(histogramData || null);
+     const kFromBins = Array.isArray(histogramData?.bins) ? histogramData.bins.length : Number(intervals);
+        setNumbers(numbersData.numbers || []);
+        setHistogram(histogramData ? { ...histogramData, k: histogramData?.k ?? kFromBins } : null);;
       setHasNextPage(numbersData.numbers.length === 100000 && Number(count) > 100000);
 
     } catch (err) {
@@ -298,7 +299,7 @@ export default function DistributionForm() {
       setGof({ error: e.message })
     }
   }
-
+const kRender = histogram?.k ?? histogram?.bins?.length ?? Number(intervals);
   return (
     <section className="card">
       <form onSubmit={handleSubmit} className="form">
@@ -335,7 +336,9 @@ export default function DistributionForm() {
         {/* Intervalos (k) */}
         <div className="form-row">
           <label htmlFor="intervals">Intervalos (k)</label>
-          <select id="intervals" value={intervals} onChange={(e) => setIntervals(e.target.value)}>
+       
+            <select id="intervals" value={intervals} onChange={(e) => setIntervals(Number(e.target.value))}>
+
             {[5, 10, 15, 20, 25].map((k) => (
               <option key={k} value={k}>{k}</option>
             ))}
@@ -472,9 +475,12 @@ export default function DistributionForm() {
         </div>
 
         {/* Histograma + tabla */}
+        
         {histogram && (
+          
           <div className="results-box" style={{ marginTop: 16, height: 'auto' }}>
-            <h4>Histograma de frecuencias (k={histogram.k})</h4>
+            
+            <h4>Histograma de frecuencias (k={kRender})</h4>
 
             {/* === SVG del histograma === */}
             <svg width="100%" viewBox="0 0 860 380" role="img" aria-label={`Histograma con ${histogram.k} intervalos`}>
@@ -558,7 +564,7 @@ export default function DistributionForm() {
                   <g>
                     {/* Leyenda */}
                     <text x={M.left} y={M.top - HEADER_H + 16} fontSize="13" fill="var(--muted)">
-                      {`n=${n} · k=${histogram.k} · fmax=${maxF}`}
+                      { `n=${n} · k=${kRender} · fmax=${maxF}` }
                     </text>
 
                     {/* X bajo el área de contenido */}
