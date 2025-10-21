@@ -48,7 +48,6 @@ class SimulationEngine:
     """
     Motor simplificado para eventos discreto. Por ahora implementa:
     - LLEGADA_CLIENTE(ID)
-    Más adelante agregamos FIN_ATENCION y otros.
     """
     def __init__(self, cfg, max_slots_clientes=NUM_CLIENTES):
         self.cfg = cfg
@@ -69,7 +68,8 @@ class SimulationEngine:
 
         # simulación
         self.clock = cfg["simulacion"]["mostrar_vector_estado"]["desde_minuto_j"]
-        self.next_arrival = self.clock  # primera llegada ocurre en j
+        # >>> Primera llegada debe ocurrir en j + t_inter (no en j)
+        self.next_arrival = self.clock + self.t_inter
         self.iteration = 0
 
         # estado del sistema
@@ -85,9 +85,8 @@ class SimulationEngine:
         self.est_bib_ocioso_acum = 0.0
         self.est_cli_perm_acum = 0.0
 
-    # --------- utilidades del motor ----------
+    # --------- utilidades ----------
     def _elige_transaccion(self, r):
-        # r ~ U[0,1)
         if r < self.p_pedir:
             return "Pedir"
         elif r < self.p_pedir + self.p_devolver:
@@ -121,7 +120,7 @@ class SimulationEngine:
         Ejecuta el evento de llegada en self.next_arrival.
         Devuelve un dict con los valores de las celdas para la fila del vector.
         """
-        # Garantizamos que estamos en el instante de llegada planeado:
+        # La llegada ocurre en el minuto programado:
         self.clock = self.next_arrival
         self.iteration += 1
 
@@ -140,11 +139,9 @@ class SimulationEngine:
             if libre is not None:
                 asignado = libre
         if asignado is None:
-            # va a cola
             c.estado = "EN COLA"
             self.cola.append(c.id)
         else:
-            # ocupa bibliotecario
             c.estado = f"SIENDO ATENDIDO({asignado+1})"
             r_srv, demora = self._demora_por_transaccion(tipo)
             b = self.bib[asignado]
@@ -153,36 +150,35 @@ class SimulationEngine:
             b.demora = fmt(demora)
             b.hora = fmt(self.clock + demora)
 
-        # Registrar cliente en el sistema
+        # Registrar cliente
         self.clientes[c.id] = c
 
         # 4) Programar próxima llegada
         proxima_llegada = self.clock + self.t_inter
         self.next_arrival = proxima_llegada
 
-        # 5) Preparar fila del vector
+        # 5) Armar fila
         row = {
             "iteracion": self.iteration,
             "evento": "LLEGADA_CLIENTE",
             "reloj": fmt(self.clock, 2),
 
-            # bloque LLEGADA_CLIENTE
+            # LLEGADA_CLIENTE
             "lleg_tiempo": fmt(self.t_inter, 2),
             "lleg_minuto": fmt(proxima_llegada, 2),
 
-            # bloque TRANSACCION
+            # TRANSACCION
             "trx_rnd": fmt(r_trx, 4),
             "trx_tipo": tipo,
 
-            # bloque ¿Dónde lee? (solo al finalizar la atención)
+            # ¿Dónde lee? (se completará en fin de atención si pidió libro)
             "lee_rnd": "",
             "lee_lugar": "",
             "lee_tiempo": "",
             "lee_fin": "",
         }
 
-        # estados de bibliotecarios después del evento
-        # Si no se modificaron, mostrar su último estado
+        # Bibliotecarios
         row.update({
             "b1_estado": self.bib[0].estado,
             "b1_rnd": self.bib[0].rnd,
@@ -194,10 +190,8 @@ class SimulationEngine:
             "b2_hora": self.bib[1].hora,
         })
 
-        # COLA
+        # COLA y placeholders
         row["cola"] = len(self.cola)
-
-        # BIBLIOTECA y ESTADISTICAS (placeholder por ahora)
         row.update({
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas,
@@ -207,7 +201,7 @@ class SimulationEngine:
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         })
 
-        # ---- CLIENTES al final (muestran clientes presentes en el sistema) ----
+        # CLIENTES al final
         vivos = [self.clientes[k] for k in sorted(self.clientes.keys()) if self.clientes[k].estado != "L"]
         vivos = vivos[: self.max_slots]
         for i in range(self.max_slots):
@@ -231,16 +225,16 @@ class SimulationWindow(tk.Toplevel):
     def __init__(self, master, config_dict, num_clientes=NUM_CLIENTES):
         super().__init__(master)
         self.title("Vector de Estado - Simulación")
-        self.geometry("1280x680")
+        self.geometry("1280x700")
         self.minsize(1040, 520)
 
         self.engine = SimulationEngine(config_dict, max_slots_clientes=num_clientes)
-        self.next_cid = 1  # auto-id para pruebas manuales
+        self.next_cid = 1  # auto-id para probar
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
 
-        # Barra superior: resumen + acciones
+        # Barra superior
         top = ttk.Frame(root)
         top.pack(fill="x")
         resumen = ttk.Label(
@@ -306,7 +300,7 @@ class SimulationWindow(tk.Toplevel):
             end_idx = len(self.columns) - 1
             self.cliente_groups.append((f"CLIENTE {i}", start_idx, end_idx))
 
-        # grupos superiores (con color)
+        # grupos superiores
         self.groups = [
             ("", 0, 2),  # Num iteración + Evento + Reloj
             ("LLEGADA_CLIENTE", 3, 4),
@@ -357,6 +351,9 @@ class SimulationWindow(tk.Toplevel):
         self.bind("<Configure>", lambda e: self._draw_group_headers())
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 28))
 
+        # >>> Fila de INICIALIZACION al abrir
+        self._insert_initialization_row()
+
     # --- dibujo de grupos ---
     def _total_width(self):
         return sum(self.tree.column(c["id"], option="width") for c in self.columns)
@@ -383,12 +380,40 @@ class SimulationWindow(tk.Toplevel):
             self.header_canvas.create_line(x1, 0, x1, h, fill="#e5e7eb")
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
 
+    # --- fila de inicialización ---
+    def _insert_initialization_row(self):
+        eng = self.engine
+        init = {
+            "iteracion": 0,
+            "evento": "INICIALIZACION",
+            "reloj": fmt(eng.clock, 2),
+            "lleg_tiempo": fmt(eng.t_inter, 2),
+            "lleg_minuto": fmt(eng.next_arrival, 2),
+
+            "trx_rnd": "", "trx_tipo": "",
+            "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
+
+            "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
+            "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
+
+            "cola": 0,
+            "biblio_estado": "", "biblio_personas": 0,
+            "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
+            "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
+        }
+        # clientes vacíos
+        for i in range(NUM_CLIENTES):
+            init[f"c{i+1}_estado"] = ""
+            init[f"c{i+1}_hora_llegada"] = ""
+            init[f"c{i+1}_a_que_fue"] = ""
+            init[f"c{i+1}_cuando_termina"] = ""
+        values = [init.get(cid, "") for cid in self.col_ids]
+        self.tree.insert("", "end", values=values)
+
     # --- acciones ---
     def on_llegada(self):
-        # Ejecuta el evento, arma la fila y la inserta
         row_dict = self.engine.llegada_cliente(self.next_cid)
         self.next_cid += 1
-
         values = [row_dict.get(cid, "") for cid in self.col_ids]
         self.tree.insert("", "end", values=values)
 
