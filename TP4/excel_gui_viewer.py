@@ -1,13 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import json
+import json, random, math
 
 APP_TITLE = "Parámetros de Simulación - Biblioteca (Una sola pantalla)"
 GROUP_BG = "#e8efff"   # color para encabezados de grupo
 GROUP_BORDER = "#a8b3d7"
-NUM_CLIENTES = 3       # <<<<< cambialo si querés más/menos clientes (CLIENTE 1..N)
+NUM_CLIENTES = 3       # columnas de CLIENTE 1..N al final
 
-# ---------- Utils ----------
+# ----------------- Helpers -----------------
 def int_or_none(s: str):
     try:
         return int(s)
@@ -23,91 +23,281 @@ def between(value, lo=None, hi=None):
         return False
     return True
 
+def fmt(x, nd=2):
+    if x is None or x == "":
+        return ""
+    return f"{x:.{nd}f}"
 
-# ========== Ventana de Vector de Estado (2da pantalla) ==========
+# ----------------- Modelos -----------------
+class Cliente:
+    def __init__(self, cid, hora_llegada):
+        self.id = cid
+        self.estado = "EN COLA"      # EN COLA | SIENDO ATENDIDO(i) | EC LEYENDO | L (destruido)
+        self.hora_llegada = hora_llegada
+        self.a_que_fue = ""          # Pedir | Devolver | Consultar
+        self.cuando_termina_leer = ""  # minutos absolutos si aplica
+
+class Bibliotecario:
+    def __init__(self):
+        self.estado = "LIBRE"        # LIBRE | OCUPADO
+        self.rnd = ""
+        self.demora = ""
+        self.hora = ""               # fin de servicio (min absoluto)
+
+class SimulationEngine:
+    """
+    Motor simplificado para eventos discreto. Por ahora implementa:
+    - LLEGADA_CLIENTE(ID)
+    Más adelante agregamos FIN_ATENCION y otros.
+    """
+    def __init__(self, cfg, max_slots_clientes=NUM_CLIENTES):
+        self.cfg = cfg
+        self.max_slots = max_slots_clientes
+
+        # tiempos y porcentajes
+        self.t_inter = cfg["llegadas"]["tiempo_entre_llegadas_min"]
+        self.p_pedir = cfg["motivos"]["pedir_libros_pct"] / 100.0
+        self.p_devolver = cfg["motivos"]["devolver_libros_pct"] / 100.0
+        self.p_consultar = cfg["motivos"]["consultar_socios_pct"] / 100.0
+
+        self.uni_a = cfg["consultas_uniforme"]["a_min"]
+        self.uni_b = cfg["consultas_uniforme"]["b_min"]
+
+        # lectura
+        self.p_retira = cfg["lectura"]["retira_casa_pct"] / 100.0
+        self.t_lect_biblio = cfg["lectura"]["tiempo_fijo_biblioteca_min"]
+
+        # simulación
+        self.clock = cfg["simulacion"]["mostrar_vector_estado"]["desde_minuto_j"]
+        self.next_arrival = self.clock  # primera llegada ocurre en j
+        self.iteration = 0
+
+        # estado del sistema
+        self.cola = []             # ids en cola
+        self.clientes = {}         # id -> Cliente
+        self.bib = [Bibliotecario(), Bibliotecario()]
+
+        # métricas / placeholders
+        self.biblio_estado = ""
+        self.biblio_personas = 0
+        self.est_b1_libre = 0.0
+        self.est_b2_libre = 0.0
+        self.est_bib_ocioso_acum = 0.0
+        self.est_cli_perm_acum = 0.0
+
+    # --------- utilidades del motor ----------
+    def _elige_transaccion(self, r):
+        # r ~ U[0,1)
+        if r < self.p_pedir:
+            return "Pedir"
+        elif r < self.p_pedir + self.p_devolver:
+            return "Devolver"
+        else:
+            return "Consultar"
+
+    def _demora_por_transaccion(self, tipo):
+        r = random.random()
+        if tipo == "Consultar":
+            demora = self.uni_a + (self.uni_b - self.uni_a) * r
+        elif tipo == "Devolver":
+            demora = 1.5 + r * (2.5 - 1.5)
+        else:  # Pedir
+            demora = -6.0 * math.log(1.0 - r)
+        return r, demora
+
+    def _hay_alguien_en_cola(self):
+        return len(self.cola) > 0
+
+    def _primer_bibliotecario_libre(self):
+        if self.bib[0].estado == "LIBRE":
+            return 0
+        if self.bib[1].estado == "LIBRE":
+            return 1
+        return None
+
+    # --------- EVENTO: LLEGADA_CLIENTE ----------
+    def llegada_cliente(self, cid):
+        """
+        Ejecuta el evento de llegada en self.next_arrival.
+        Devuelve un dict con los valores de las celdas para la fila del vector.
+        """
+        # Garantizamos que estamos en el instante de llegada planeado:
+        self.clock = self.next_arrival
+        self.iteration += 1
+
+        # 1) Crear objeto temporal cliente
+        c = Cliente(cid, hora_llegada=self.clock)
+
+        # 2) Determinar transacción (RND y tipo)
+        r_trx = random.random()
+        tipo = self._elige_transaccion(r_trx)
+        c.a_que_fue = tipo
+
+        # 3) Decidir atención o cola
+        asignado = None
+        if (not self._hay_alguien_en_cola()):
+            libre = self._primer_bibliotecario_libre()
+            if libre is not None:
+                asignado = libre
+        if asignado is None:
+            # va a cola
+            c.estado = "EN COLA"
+            self.cola.append(c.id)
+        else:
+            # ocupa bibliotecario
+            c.estado = f"SIENDO ATENDIDO({asignado+1})"
+            r_srv, demora = self._demora_por_transaccion(tipo)
+            b = self.bib[asignado]
+            b.estado = "OCUPADO"
+            b.rnd = fmt(r_srv)
+            b.demora = fmt(demora)
+            b.hora = fmt(self.clock + demora)
+
+        # Registrar cliente en el sistema
+        self.clientes[c.id] = c
+
+        # 4) Programar próxima llegada
+        proxima_llegada = self.clock + self.t_inter
+        self.next_arrival = proxima_llegada
+
+        # 5) Preparar fila del vector
+        row = {
+            "iteracion": self.iteration,
+            "evento": "LLEGADA_CLIENTE",
+            "reloj": fmt(self.clock, 2),
+
+            # bloque LLEGADA_CLIENTE
+            "lleg_tiempo": fmt(self.t_inter, 2),
+            "lleg_minuto": fmt(proxima_llegada, 2),
+
+            # bloque TRANSACCION
+            "trx_rnd": fmt(r_trx, 4),
+            "trx_tipo": tipo,
+
+            # bloque ¿Dónde lee? (solo al finalizar la atención)
+            "lee_rnd": "",
+            "lee_lugar": "",
+            "lee_tiempo": "",
+            "lee_fin": "",
+        }
+
+        # estados de bibliotecarios después del evento
+        # Si no se modificaron, mostrar su último estado
+        row.update({
+            "b1_estado": self.bib[0].estado,
+            "b1_rnd": self.bib[0].rnd,
+            "b1_demora": self.bib[0].demora,
+            "b1_hora": self.bib[0].hora,
+            "b2_estado": self.bib[1].estado,
+            "b2_rnd": self.bib[1].rnd,
+            "b2_demora": self.bib[1].demora,
+            "b2_hora": self.bib[1].hora,
+        })
+
+        # COLA
+        row["cola"] = len(self.cola)
+
+        # BIBLIOTECA y ESTADISTICAS (placeholder por ahora)
+        row.update({
+            "biblio_estado": self.biblio_estado,
+            "biblio_personas": self.biblio_personas,
+            "est_b1_libre": fmt(self.est_b1_libre),
+            "est_b2_libre": fmt(self.est_b2_libre),
+            "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
+            "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
+        })
+
+        # ---- CLIENTES al final (muestran clientes presentes en el sistema) ----
+        vivos = [self.clientes[k] for k in sorted(self.clientes.keys()) if self.clientes[k].estado != "L"]
+        vivos = vivos[: self.max_slots]
+        for i in range(self.max_slots):
+            if i < len(vivos):
+                cli = vivos[i]
+                row[f"c{i+1}_estado"] = cli.estado
+                row[f"c{i+1}_hora_llegada"] = fmt(cli.hora_llegada, 2)
+                row[f"c{i+1}_a_que_fue"] = cli.a_que_fue
+                row[f"c{i+1}_cuando_termina"] = cli.cuando_termina_leer
+            else:
+                row[f"c{i+1}_estado"] = ""
+                row[f"c{i+1}_hora_llegada"] = ""
+                row[f"c{i+1}_a_que_fue"] = ""
+                row[f"c{i+1}_cuando_termina"] = ""
+
+        return row
+
+
+# ----------------- 2ª Ventana (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
-    """
-    Muestra el Vector de Estado con cabeceras agrupadas,
-    preparada para recibir filas desde la simulación.
-    """
     def __init__(self, master, config_dict, num_clientes=NUM_CLIENTES):
         super().__init__(master)
         self.title("Vector de Estado - Simulación")
-        self.geometry("1280x640")
-        self.minsize(1040, 480)
+        self.geometry("1280x680")
+        self.minsize(1040, 520)
+
+        self.engine = SimulationEngine(config_dict, max_slots_clientes=num_clientes)
+        self.next_cid = 1  # auto-id para pruebas manuales
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
 
+        # Barra superior: resumen + acciones
+        top = ttk.Frame(root)
+        top.pack(fill="x")
         resumen = ttk.Label(
-            root,
+            top,
             text=(
-                f"Config: X={config_dict['simulacion']['tiempo_limite_min']} min | "
+                f"Config → X={config_dict['simulacion']['tiempo_limite_min']} min | "
                 f"N={config_dict['simulacion']['iteraciones_max']} | "
                 f"i={config_dict['simulacion']['mostrar_vector_estado']['i_iteraciones']} "
-                f"desde j={config_dict['simulacion']['mostrar_vector_estado']['desde_minuto_j']}"
+                f"desde j={config_dict['simulacion']['mostrar_vector_estado']['desde_minuto_j']}  "
+                f"| t_entre_llegadas={config_dict['llegadas']['tiempo_entre_llegadas_min']} min"
             ),
             foreground="#374151"
         )
-        resumen.pack(anchor="w", pady=(0, 6))
+        resumen.pack(side="left")
+        ttk.Button(top, text="Llegada Cliente", command=self.on_llegada).pack(side="right")
 
-        # ---- Definir columnas base ----
+        # ------ columnas ------
         self.columns = []
+        def add_col(cid, text, w): self.columns.append({"id": cid, "text": text, "w": w})
 
-        def add_col(cid, text, w):
-            self.columns.append({"id": cid, "text": text, "w": w})
-
-        # 0) Nueva columna inicial:
         add_col("iteracion", "Numero de iteracion", 160)
-
-        # Evento / Reloj
         add_col("evento", "Evento", 110)
         add_col("reloj", "Reloj (minutos)", 130)
-
         # LLEGADA_CLIENTE
         add_col("lleg_tiempo", "TIEMPO", 90)
         add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)
-
         # TRANSACCION
-        add_col("trx_rnd", "RND", 70)
+        add_col("trx_rnd", "RND", 80)
         add_col("trx_tipo", "Tipo Transaccion", 160)
-
         # ¿Dónde Lee?
         add_col("lee_rnd", "RND", 70)
         add_col("lee_lugar", "LUGAR", 110)
         add_col("lee_tiempo", "TIEMPO", 100)
         add_col("lee_fin", "Fin Lectura", 130)
-
-        # BIBLIOTECARIO 1
+        # BIBLIO 1
         add_col("b1_estado", "Estado", 90)
         add_col("b1_rnd", "RND", 70)
         add_col("b1_demora", "Demora", 100)
         add_col("b1_hora", "Hora", 110)
-
-        # BIBLIOTECARIO 2
+        # BIBLIO 2
         add_col("b2_estado", "Estado", 90)
         add_col("b2_rnd", "RND", 70)
         add_col("b2_demora", "Demora", 100)
         add_col("b2_hora", "Hora", 110)
-
         # COLA
         add_col("cola", "COLA", 90)
-
         # BIBLIOTECA
         add_col("biblio_estado", "Estado", 95)
         add_col("biblio_personas", "Personas en la biblioteca (MAXIMO 20)", 270)
-
-        # ESTADISTICAS - BIBLIOTECARIOS
+        # ESTADISTICAS
         add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO1", 230)
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
-
-        # ESTADISTICAS - CLIENTES
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
-
-        # CLIENTES (objetos temporales) al final: CLIENTE 1..N con 4 subcolumnas
-        self.cliente_groups = []  # para pintar grupos "CLIENTE 1", "CLIENTE 2", ...
-        for i in range(1, max(1, int(num_clientes)) + 1):
+        # CLIENTES al final
+        self.cliente_groups = []
+        for i in range(1, num_clientes + 1):
             start_idx = len(self.columns)
             add_col(f"c{i}_estado", "ESTADO", 100)
             add_col(f"c{i}_hora_llegada", "HORA_LLEGADA", 130)
@@ -116,10 +306,9 @@ class SimulationWindow(tk.Toplevel):
             end_idx = len(self.columns) - 1
             self.cliente_groups.append((f"CLIENTE {i}", start_idx, end_idx))
 
-        # ---- Grupos (fila superior de cabeceras) ----
-        # (Etiqueta, índice columna inicial, índice columna final)
+        # grupos superiores (con color)
         self.groups = [
-            ("", 0, 2),  # Numero de iteracion + Evento + Reloj
+            ("", 0, 2),  # Num iteración + Evento + Reloj
             ("LLEGADA_CLIENTE", 3, 4),
             ("TRANSACCION", 5, 6),
             ("¿Dónde Lee? - solo si pide Libro (cuenta luego de la atención)", 7, 10),
@@ -129,11 +318,10 @@ class SimulationWindow(tk.Toplevel):
             ("BIBLIOTECA", 20, 21),
             ("ESTADISTICAS · BIBLIOTECARIOS", 22, 24),
             ("ESTADISTICAS · CLIENTES", 25, 25),
-            # Luego agregamos dinámicamente los grupos de clientes:
             *self.cliente_groups,
         ]
 
-        # ---- Header Canvas (grupos) + Treeview (hojas) ----
+        # header + tree
         wrapper = ttk.Frame(root)
         wrapper.pack(fill="both", expand=True)
 
@@ -159,26 +347,17 @@ class SimulationWindow(tk.Toplevel):
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=on_tree_xscroll)
         xscroll.configure(command=on_xscroll)
 
-        # Configurar columnas hoja
         self.col_ids = [c["id"] for c in self.columns]
         self.tree["columns"] = self.col_ids
         for c in self.columns:
             self.tree.heading(c["id"], text=c["text"], anchor="center")
             self.tree.column(c["id"], width=c["w"], minwidth=40, anchor="center", stretch=False)
 
-        # Dibujar la fila superior de grupos (con color distintivo)
         self._draw_group_headers()
-
-        # Redibujar en resize
         self.bind("<Configure>", lambda e: self._draw_group_headers())
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 28))
 
-        # Fila placeholder para ver el ancho
-        self.tree.insert("", "end", values=[""] * len(self.col_ids))
-
-        # API pública para agregar filas desde la simulación:
-        # self.add_rows([...])
-
+    # --- dibujo de grupos ---
     def _total_width(self):
         return sum(self.tree.column(c["id"], option="width") for c in self.columns)
 
@@ -197,23 +376,24 @@ class SimulationWindow(tk.Toplevel):
         for text, i0, i1 in self.groups:
             x0 = xs[i0][0]
             x1 = xs[i1][1]
-            # bloque de grupo con color diferenciado
             self.header_canvas.create_rectangle(x0, 0, x1, h, fill=GROUP_BG, outline=GROUP_BORDER)
-            self.header_canvas.create_text((x0 + x1) / 2, h / 2, text=text, anchor="center", font=("Segoe UI", 9, "bold"))
-        # líneas guía fin de columna
+            self.header_canvas.create_text((x0 + x1) / 2, h / 2, text=text, anchor="center",
+                                           font=("Segoe UI", 9, "bold"))
         for x0, x1 in xs:
             self.header_canvas.create_line(x1, 0, x1, h, fill="#e5e7eb")
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
 
-    def add_rows(self, rows):
-        """rows: lista de iterables del mismo largo que self.col_ids"""
-        for r in rows:
-            if len(r) != len(self.col_ids):
-                raise ValueError(f"Fila con {len(r)} valores; se esperaban {len(self.col_ids)}.")
-            self.tree.insert("", "end", values=r)
+    # --- acciones ---
+    def on_llegada(self):
+        # Ejecuta el evento, arma la fila y la inserta
+        row_dict = self.engine.llegada_cliente(self.next_cid)
+        self.next_cid += 1
+
+        values = [row_dict.get(cid, "") for cid in self.col_ids]
+        self.tree.insert("", "end", values=values)
 
 
-# ========== Ventana principal (configuración) ==========
+# ----------------- 1ª Ventana (config) -----------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -221,7 +401,6 @@ class App(tk.Tk):
         self.geometry("980x760")
         self.minsize(900, 680)
 
-        # Estilos
         self.style = ttk.Style(self)
         self.style.configure("Invalid.TEntry", fieldbackground="#ffe6e6")
         self.style.configure("Ok.TLabel", foreground="#15803d")
@@ -323,7 +502,7 @@ class App(tk.Tk):
         if help_:
             ttk.Label(row, text=help_, foreground="#6b7280").grid(row=0, column=2, sticky="w")
 
-        def only_digits(P):  # permitir vacío mientras se escribe
+        def only_digits(P):
             return (P == "") or P.isdigit()
         vcmd = (self.register(only_digits), "%P")
         ent.configure(validate="key", validatecommand=vcmd)
@@ -370,13 +549,12 @@ class App(tk.Tk):
             self.fields[k]["var"].set(str(v))
         self.txt_out.delete("1.0", "end")
 
-    # ---------- Generar (validar + abrir 2da pantalla) ----------
+    # ---------- Generar (validar + abrir 2ª pantalla) ----------
     def on_generate(self):
         for meta in self.fields.values():
             meta["entry"].configure(style="TEntry")
 
         errors, mark = [], []
-
         def need_int(key, desc, lo, hi):
             val = int_or_none(self.fields[key]["var"].get())
             if not between(val, lo, hi):
@@ -384,7 +562,6 @@ class App(tk.Tk):
                 mark.append(key)
             return val
 
-        # Simulación
         t_lim = need_int("tiempo_limite", "Tiempo límite X", 1, 10_000)
         n_max = need_int("iteraciones_max", "Cantidad de iteraciones N", 1, 100_000)
         i_mos = need_int("i_mostrar", "i (iteraciones a mostrar)", 1, 100_000)
@@ -393,25 +570,18 @@ class App(tk.Tk):
         if None not in (t_lim, j_ini) and j_ini >= t_lim:
             errors.append("• j (minuto de inicio) debe ser menor que X (tiempo límite).")
             mark += ["j_inicio", "tiempo_limite"]
-
         if None not in (i_mos, n_max) and i_mos > n_max:
             errors.append("• i no debería exceder N (cantidad de iteraciones).")
             mark += ["i_mostrar", "iteraciones_max"]
 
-        # Llegadas
         t_lleg = need_int("t_entre_llegadas", "Tiempo entre llegadas (min)", 1, 10_000)
-
-        # Motivos %
         p_ped = need_int("pct_pedir", "Pedir libros (%)", 0, 100)
         p_dev = need_int("pct_devolver", "Devolver libros (%)", 0, 100)
         p_con = need_int("pct_consultar", "Consultar hacerse socio (%)", 0, 100)
-        if None not in (p_ped, p_dev, p_con):
-            s = p_ped + p_dev + p_con
-            if s != 100:
-                errors.append(f"• La suma de motivos debe ser 100% (suma actual: {s}%).")
-                mark += ["pct_pedir", "pct_devolver", "pct_consultar"]
+        if None not in (p_ped, p_dev, p_con) and (p_ped + p_dev + p_con != 100):
+            errors.append(f"• La suma de motivos debe ser 100% (suma actual: {p_ped + p_dev + p_con}%).")
+            mark += ["pct_pedir", "pct_devolver", "pct_consultar"]
 
-        # Uniforme
         a = need_int("uni_a", "Uniforme A (min)", 0, 10_000)
         b = need_int("uni_b", "Uniforme B (min)", 0, 10_000)
         if None not in (a, b):
@@ -422,7 +592,6 @@ class App(tk.Tk):
                 errors.append("• En Uniforme(A, B) debe cumplirse A < B.")
                 mark += ["uni_a", "uni_b"]
 
-        # Lectura
         p_ret = need_int("pct_retira", "Se retira a leer en casa (%)", 0, 100)
         t_bib = need_int("t_lectura_biblio", "Tiempo fijo en biblioteca (min)", 1, 10_000)
 
@@ -452,16 +621,15 @@ class App(tk.Tk):
             }
         }
 
-        # Mostrar JSON (como antes)
+        # mostrar JSON (como antes)
         self.txt_out.delete("1.0", "end")
         pretty = json.dumps(cfg, indent=2, ensure_ascii=False)
         self.txt_out.insert("1.0", pretty)
         self.clipboard_clear()
         self.clipboard_append(pretty)
 
-        # Abrir 2da pantalla con columnas actualizadas
+        # abrir vector de estado
         SimulationWindow(self, cfg, num_clientes=NUM_CLIENTES)
-
 
 if __name__ == "__main__":
     App().mainloop()
