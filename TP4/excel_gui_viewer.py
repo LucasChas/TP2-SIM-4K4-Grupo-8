@@ -3,9 +3,9 @@ from tkinter import ttk, messagebox
 import json, random, math
 
 APP_TITLE = "Parámetros de Simulación - Biblioteca (Una sola pantalla)"
-GROUP_BG = "#e8efff"   # color para encabezados de grupo
+GROUP_BG = "#e8efff"
 GROUP_BORDER = "#a8b3d7"
-NUM_CLIENTES = 3       # columnas de CLIENTE 1..N al final
+NUM_CLIENTES = 3  # columnas de CLIENTE 1..N al final
 
 # ----------------- Helpers -----------------
 def int_or_none(s: str):
@@ -32,22 +32,30 @@ def fmt(x, nd=2):
 class Cliente:
     def __init__(self, cid, hora_llegada):
         self.id = cid
-        self.estado = "EN COLA"      # EN COLA | SIENDO ATENDIDO(i) | EC LEYENDO | L (destruido)
+        self.estado = "EN COLA"      # EN COLA | SIENDO ATENDIDO(i) | EC LEYENDO | L
         self.hora_llegada = hora_llegada
         self.a_que_fue = ""          # Pedir | Devolver | Consultar
-        self.cuando_termina_leer = ""  # minutos absolutos si aplica
+        self.cuando_termina_leer = ""   # string p/mostrar
+        self.fin_lect_num = None        # float p/cálculo
+        self.hora_entrada_cola = None   # cuando entra a cola (luego de leer)
 
 class Bibliotecario:
     def __init__(self):
         self.estado = "LIBRE"        # LIBRE | OCUPADO
         self.rnd = ""
         self.demora = ""
-        self.hora = ""               # fin de servicio (min absoluto)
+        self.hora = ""               # fin (string)
+        self.hora_num = None         # fin (float)
+        self.cliente_id = None
 
+# ----------------- Motor de simulación -----------------
 class SimulationEngine:
     """
-    Motor simplificado para eventos discreto. Por ahora implementa:
-    - LLEGADA_CLIENTE(ID)
+    Eventos:
+      - LLEGADA_CLIENTE
+      - FIN_ATENCION_i (i=1,2)
+      - FIN_LECTURA
+    Selección automática del próximo evento por tiempo mínimo.
     """
     def __init__(self, cfg, max_slots_clientes=NUM_CLIENTES):
         self.cfg = cfg
@@ -66,18 +74,22 @@ class SimulationEngine:
         self.p_retira = cfg["lectura"]["retira_casa_pct"] / 100.0
         self.t_lect_biblio = cfg["lectura"]["tiempo_fijo_biblioteca_min"]
 
+        # límites
+        self.time_limit = cfg["simulacion"]["tiempo_limite_min"]
+        self.iter_limit = cfg["simulacion"]["iteraciones_max"]
+
         # simulación
         self.clock = cfg["simulacion"]["mostrar_vector_estado"]["desde_minuto_j"]
-        # >>> Primera llegada debe ocurrir en j + t_inter (no en j)
-        self.next_arrival = self.clock + self.t_inter
+        self.next_arrival = self.clock + self.t_inter  # 1ª llegada en j + t_inter
         self.iteration = 0
+        self.next_client_id = 1
 
-        # estado del sistema
-        self.cola = []             # ids en cola
+        # estado
+        self.cola = []             # ids FIFO
         self.clientes = {}         # id -> Cliente
         self.bib = [Bibliotecario(), Bibliotecario()]
 
-        # métricas / placeholders
+        # métricas / placeholders (a completar más adelante)
         self.biblio_estado = ""
         self.biblio_personas = 0
         self.est_b1_libre = 0.0
@@ -114,95 +126,91 @@ class SimulationEngine:
             return 1
         return None
 
-    # --------- EVENTO: LLEGADA_CLIENTE ----------
-    def llegada_cliente(self, cid):
+    def _tomar_de_cola(self, idx_bib):
+        """Si hay cola, comienza a atender al primero en self.clock."""
+        if not self.cola:
+            return
+        b = self.bib[idx_bib]
+        cid = self.cola.pop(0)
+        c = self.clientes[cid]
+        c.estado = f"SIENDO ATENDIDO({idx_bib+1})"
+        r_srv, demora = self._demora_por_transaccion(c.a_que_fue)
+        b.estado = "OCUPADO"
+        b.rnd = fmt(r_srv)
+        b.demora = fmt(demora)
+        b.hora_num = self.clock + demora
+        b.hora = fmt(b.hora_num)
+        b.cliente_id = cid
+
+    # --------- selección del próximo evento ----------
+    def _proximo_evento(self):
         """
-        Ejecuta el evento de llegada en self.next_arrival.
-        Devuelve un dict con los valores de las celdas para la fila del vector.
+        Devuelve (t, prioridad, tipo, data)
+        tipo ∈ {"llegada", "fin_atencion", "fin_lectura"}
+        data: {"i":1/2} o {"cid":...}
+        Prioridades para empates: 1=FIN_AT_1, 2=FIN_AT_2, 3=FIN_LECTURA, 4=LLEGADA
         """
-        # La llegada ocurre en el minuto programado:
-        self.clock = self.next_arrival
-        self.iteration += 1
+        candidatos = []
 
-        # 1) Crear objeto temporal cliente
-        c = Cliente(cid, hora_llegada=self.clock)
+        # FIN_ATENCION 1 y 2
+        if self.bib[0].hora_num is not None:
+            candidatos.append((self.bib[0].hora_num, 1, "fin_atencion", {"i": 1}))
+        if self.bib[1].hora_num is not None:
+            candidatos.append((self.bib[1].hora_num, 2, "fin_atencion", {"i": 2}))
 
-        # 2) Determinar transacción (RND y tipo)
-        r_trx = random.random()
-        tipo = self._elige_transaccion(r_trx)
-        c.a_que_fue = tipo
+        # FIN_LECTURA (usar ID para desempatar entre lectores)
+        for cid, c in self.clientes.items():
+            if c.estado == "EC LEYENDO" and c.fin_lect_num is not None:
+                # prioridad base 3, pero con micro-desempate por ID
+                candidatos.append((c.fin_lect_num, 3 + cid * 1e-6, "fin_lectura", {"cid": cid}))
 
-        # 3) Decidir atención o cola
-        asignado = None
-        if (not self._hay_alguien_en_cola()):
-            libre = self._primer_bibliotecario_libre()
-            if libre is not None:
-                asignado = libre
-        if asignado is None:
-            c.estado = "EN COLA"
-            self.cola.append(c.id)
-        else:
-            c.estado = f"SIENDO ATENDIDO({asignado+1})"
-            r_srv, demora = self._demora_por_transaccion(tipo)
-            b = self.bib[asignado]
-            b.estado = "OCUPADO"
-            b.rnd = fmt(r_srv)
-            b.demora = fmt(demora)
-            b.hora = fmt(self.clock + demora)
+        # LLEGADA
+        if self.next_arrival is not None:
+            candidatos.append((self.next_arrival, 4, "llegada", {}))
 
-        # Registrar cliente
-        self.clientes[c.id] = c
+        if not candidatos:
+            return None
 
-        # 4) Programar próxima llegada
-        proxima_llegada = self.clock + self.t_inter
-        self.next_arrival = proxima_llegada
+        t, pr, tipo, data = min(candidatos, key=lambda x: (x[0], x[1]))
+        return (t, pr, tipo, data)
 
-        # 5) Armar fila
+    def hay_mas(self):
+        ne = self._proximo_evento()
+        if ne is None:
+            return False
+        t, *_ = ne
+        if self.iteration >= self.iter_limit:
+            return False
+        if t > self.time_limit:
+            return False
+        return True
+
+    # --------- fila común (rellena columnas compartidas) ----------
+    def _armar_fila_base(self, evento):
         row = {
             "iteracion": self.iteration,
-            "evento": "LLEGADA_CLIENTE",
+            "evento": evento,
             "reloj": fmt(self.clock, 2),
-
-            # LLEGADA_CLIENTE
             "lleg_tiempo": fmt(self.t_inter, 2),
-            "lleg_minuto": fmt(proxima_llegada, 2),
-
-            # TRANSACCION
-            "trx_rnd": fmt(r_trx, 4),
-            "trx_tipo": tipo,
-
-            # ¿Dónde lee? (se completará en fin de atención si pidió libro)
-            "lee_rnd": "",
-            "lee_lugar": "",
-            "lee_tiempo": "",
-            "lee_fin": "",
-        }
-
-        # Bibliotecarios
-        row.update({
-            "b1_estado": self.bib[0].estado,
-            "b1_rnd": self.bib[0].rnd,
-            "b1_demora": self.bib[0].demora,
-            "b1_hora": self.bib[0].hora,
-            "b2_estado": self.bib[1].estado,
-            "b2_rnd": self.bib[1].rnd,
-            "b2_demora": self.bib[1].demora,
-            "b2_hora": self.bib[1].hora,
-        })
-
-        # COLA y placeholders
-        row["cola"] = len(self.cola)
-        row.update({
-            "biblio_estado": self.biblio_estado,
-            "biblio_personas": self.biblio_personas,
-            "est_b1_libre": fmt(self.est_b1_libre),
-            "est_b2_libre": fmt(self.est_b2_libre),
+            "lleg_minuto": fmt(self.next_arrival, 2),
+            "trx_rnd": "", "trx_tipo": "",
+            "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
+            "b1_estado": self.bib[0].estado, "b1_rnd": self.bib[0].rnd,
+            "b1_demora": self.bib[0].demora, "b1_hora": self.bib[0].hora,
+            "b2_estado": self.bib[1].estado, "b2_rnd": self.bib[1].rnd,
+            "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
+            "cola": len(self.cola),
+            "biblio_estado": self.biblio_estado, "biblio_personas": self.biblio_personas,
+            "est_b1_libre": fmt(self.est_b1_libre), "est_b2_libre": fmt(self.est_b2_libre),
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
-        })
+        }
+        self._llenar_bloque_clientes(row)
+        return row
 
-        # CLIENTES al final
-        vivos = [self.clientes[k] for k in sorted(self.clientes.keys()) if self.clientes[k].estado != "L"]
+    def _llenar_bloque_clientes(self, row):
+        vivos = [self.clientes[k] for k in sorted(self.clientes.keys())
+                 if self.clientes[k].estado != "L"]
         vivos = vivos[: self.max_slots]
         for i in range(self.max_slots):
             if i < len(vivos):
@@ -217,19 +225,181 @@ class SimulationEngine:
                 row[f"c{i+1}_a_que_fue"] = ""
                 row[f"c{i+1}_cuando_termina"] = ""
 
+    # --------- eventos concretos ----------
+    def _evento_llegada(self):
+        self.clock = self.next_arrival
+        self.iteration += 1
+
+        cid = self.next_client_id
+        self.next_client_id += 1
+
+        c = Cliente(cid, hora_llegada=self.clock)
+
+        r_trx = random.random()
+        tipo = self._elige_transaccion(r_trx)
+        c.a_que_fue = tipo
+
+        asignado = None
+        if not self._hay_alguien_en_cola():
+            libre = self._primer_bibliotecario_libre()
+            if libre is not None:
+                asignado = libre
+
+        if asignado is None:
+            c.estado = "EN COLA"
+            c.hora_entrada_cola = self.clock
+            self.cola.append(c.id)
+        else:
+            c.estado = f"SIENDO ATENDIDO({asignado+1})"
+            r_srv, demora = self._demora_por_transaccion(tipo)
+            b = self.bib[asignado]
+            b.estado = "OCUPADO"
+            b.rnd = fmt(r_srv)
+            b.demora = fmt(demora)
+            b.hora_num = self.clock + demora
+            b.hora = fmt(b.hora_num)
+            b.cliente_id = c.id
+
+        self.clientes[c.id] = c
+
+        # programar próxima llegada
+        self.next_arrival = self.clock + self.t_inter
+
+        row = {
+            "iteracion": self.iteration,
+            "evento": "LLEGADA_CLIENTE",
+            "reloj": fmt(self.clock, 2),
+            "lleg_tiempo": fmt(self.t_inter, 2),
+            "lleg_minuto": fmt(self.next_arrival, 2),
+            "trx_rnd": fmt(r_trx, 4),
+            "trx_tipo": tipo,
+            "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
+            "b1_estado": self.bib[0].estado, "b1_rnd": self.bib[0].rnd,
+            "b1_demora": self.bib[0].demora, "b1_hora": self.bib[0].hora,
+            "b2_estado": self.bib[1].estado, "b2_rnd": self.bib[1].rnd,
+            "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
+            "cola": len(self.cola),
+            "biblio_estado": self.biblio_estado, "biblio_personas": self.biblio_personas,
+            "est_b1_libre": fmt(self.est_b1_libre), "est_b2_libre": fmt(self.est_b2_libre),
+            "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
+            "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
+        }
+        self._llenar_bloque_clientes(row)
         return row
 
+    def _evento_fin_atencion(self, i):
+        idx = i - 1
+        b = self.bib[idx]
+        # mover reloj a ese fin
+        self.clock = b.hora_num
+        self.iteration += 1
+
+        cid = b.cliente_id
+        cli = self.clientes[cid]
+
+        # decide destino del cliente
+        lee_rnd = ""
+        lee_lugar = ""
+        lee_tiempo = ""
+        lee_fin = ""
+
+        if cli.a_que_fue == "Pedir":
+            r = random.random()
+            lee_rnd = fmt(r, 4)
+            if r < self.p_retira:
+                # se retira a casa
+                lee_lugar = "Casa"
+                cli.estado = "L"
+                cli.fin_lect_num = None
+                cli.cuando_termina_leer = ""
+            else:
+                # se queda en biblioteca leyendo
+                lee_lugar = "Biblioteca"
+                cli.estado = "EC LEYENDO"
+                fin_lec = self.clock + self.t_lect_biblio
+                cli.fin_lect_num = fin_lec
+                cli.cuando_termina_leer = fmt(fin_lec, 2)
+                lee_tiempo = fmt(self.t_lect_biblio, 2)  # solo esta fila
+                lee_fin = cli.cuando_termina_leer
+        else:
+            # consulta/devolver -> destrucción
+            cli.estado = "L"
+            cli.fin_lect_num = None
+            cli.cuando_termina_leer = ""
+
+        # liberar bibliotecario y tomar de cola si hay
+        b.estado = "LIBRE"; b.rnd = ""; b.demora = ""; b.hora = ""; b.hora_num = None; b.cliente_id = None
+        self._tomar_de_cola(idx)
+
+        row = self._armar_fila_base(f"FIN_ATENCION_{i}({cid})")
+        row["lee_rnd"] = lee_rnd
+        row["lee_lugar"] = lee_lugar
+        row["lee_tiempo"] = lee_tiempo
+        row["lee_fin"] = lee_fin
+        return row
+
+    def _evento_fin_lectura(self, cid):
+        # reloj salta a fin de lectura de ese cliente
+        c = self.clientes[cid]
+        self.clock = c.fin_lect_num
+        self.iteration += 1
+
+        # va a devolver; intenta atención directa o cola
+        c.fin_lect_num = None
+        c.cuando_termina_leer = ""
+        c.a_que_fue = "Devolver"  # única acción después de leer
+
+        libre = self._primer_bibliotecario_libre()
+        if libre is not None:
+            c.estado = f"SIENDO ATENDIDO({libre+1})"
+            r_srv, demora = self._demora_por_transaccion("Devolver")
+            b = self.bib[libre]
+            b.estado = "OCUPADO"
+            b.rnd = fmt(r_srv)
+            b.demora = fmt(demora)
+            b.hora_num = self.clock + demora
+            b.hora = fmt(b.hora_num)
+            b.cliente_id = c.id
+        else:
+            c.estado = "EN COLA"
+            c.hora_entrada_cola = self.clock
+            self.cola.append(c.id)
+
+        row = self._armar_fila_base(f"FIN_LECTURA({cid})")
+        return row
+
+    # --------- paso general ----------
+    def siguiente_evento(self):
+        """Decide y ejecuta el próximo evento. Devuelve la fila para el vector."""
+        ne = self._proximo_evento()
+        if ne is None:
+            raise StopIteration("No hay eventos pendientes.")
+        t, _, tipo, data = ne
+
+        # cortar por límites
+        if self.iteration >= self.iter_limit:
+            raise StopIteration("Se alcanzó el máximo de iteraciones.")
+        if t > self.time_limit:
+            raise StopIteration("Se alcanzó el tiempo límite de simulación.")
+
+        if tipo == "llegada":
+            return self._evento_llegada()
+        elif tipo == "fin_atencion":
+            return self._evento_fin_atencion(data["i"])
+        elif tipo == "fin_lectura":
+            return self._evento_fin_lectura(data["cid"])
+        else:
+            raise RuntimeError("Tipo de evento desconocido.")
 
 # ----------------- 2ª Ventana (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
     def __init__(self, master, config_dict, num_clientes=NUM_CLIENTES):
         super().__init__(master)
         self.title("Vector de Estado - Simulación")
-        self.geometry("1280x700")
+        self.geometry("1280x720")
         self.minsize(1040, 520)
 
         self.engine = SimulationEngine(config_dict, max_slots_clientes=num_clientes)
-        self.next_cid = 1  # auto-id para probar
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
@@ -239,24 +409,22 @@ class SimulationWindow(tk.Toplevel):
         top.pack(fill="x")
         resumen = ttk.Label(
             top,
-            text=(
-                f"Config → X={config_dict['simulacion']['tiempo_limite_min']} min | "
-                f"N={config_dict['simulacion']['iteraciones_max']} | "
-                f"i={config_dict['simulacion']['mostrar_vector_estado']['i_iteraciones']} "
-                f"desde j={config_dict['simulacion']['mostrar_vector_estado']['desde_minuto_j']}  "
-                f"| t_entre_llegadas={config_dict['llegadas']['tiempo_entre_llegadas_min']} min"
-            ),
+            text=(f"Config → X={config_dict['simulacion']['tiempo_limite_min']} min | "
+                  f"N={config_dict['simulacion']['iteraciones_max']} | "
+                  f"i={config_dict['simulacion']['mostrar_vector_estado']['i_iteraciones']} "
+                  f"desde j={config_dict['simulacion']['mostrar_vector_estado']['desde_minuto_j']}  "
+                  f"| t_entre_llegadas={config_dict['llegadas']['tiempo_entre_llegadas_min']} min"),
             foreground="#374151"
         )
         resumen.pack(side="left")
-        ttk.Button(top, text="Llegada Cliente", command=self.on_llegada).pack(side="right")
+        ttk.Button(top, text="Siguiente evento", command=self.on_next).pack(side="right")
 
         # ------ columnas ------
         self.columns = []
         def add_col(cid, text, w): self.columns.append({"id": cid, "text": text, "w": w})
 
         add_col("iteracion", "Numero de iteracion", 160)
-        add_col("evento", "Evento", 110)
+        add_col("evento", "Evento", 160)
         add_col("reloj", "Reloj (minutos)", 130)
         # LLEGADA_CLIENTE
         add_col("lleg_tiempo", "TIEMPO", 90)
@@ -302,7 +470,7 @@ class SimulationWindow(tk.Toplevel):
 
         # grupos superiores
         self.groups = [
-            ("", 0, 2),  # Num iteración + Evento + Reloj
+            ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 4),
             ("TRANSACCION", 5, 6),
             ("¿Dónde Lee? - solo si pide Libro (cuenta luego de la atención)", 7, 10),
@@ -331,12 +499,9 @@ class SimulationWindow(tk.Toplevel):
         xscroll.pack(fill="x", side="bottom")
 
         def on_xscroll(*args):
-            self.tree.xview(*args)
-            self.header_canvas.xview(*args)
-
+            self.tree.xview(*args); self.header_canvas.xview(*args)
         def on_tree_xscroll(lo, hi):
-            xscroll.set(lo, hi)
-            self.header_canvas.xview_moveto(lo)
+            xscroll.set(lo, hi); self.header_canvas.xview_moveto(lo)
 
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=on_tree_xscroll)
         xscroll.configure(command=on_xscroll)
@@ -351,7 +516,7 @@ class SimulationWindow(tk.Toplevel):
         self.bind("<Configure>", lambda e: self._draw_group_headers())
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 28))
 
-        # >>> Fila de INICIALIZACION al abrir
+        # Fila de INICIALIZACION
         self._insert_initialization_row()
 
     # --- dibujo de grupos ---
@@ -362,17 +527,14 @@ class SimulationWindow(tk.Toplevel):
         xs, acc = [], 0
         for c in self.columns:
             w = self.tree.column(c["id"], option="width")
-            xs.append((acc, acc + w))
-            acc += w
+            xs.append((acc, acc + w)); acc += w
         return xs
 
     def _draw_group_headers(self):
         self.header_canvas.delete("all")
-        xs = self._col_x_positions()
-        h = 28
+        xs = self._col_x_positions(); h = 28
         for text, i0, i1 in self.groups:
-            x0 = xs[i0][0]
-            x1 = xs[i1][1]
+            x0 = xs[i0][0]; x1 = xs[i1][1]
             self.header_canvas.create_rectangle(x0, 0, x1, h, fill=GROUP_BG, outline=GROUP_BORDER)
             self.header_canvas.create_text((x0 + x1) / 2, h / 2, text=text, anchor="center",
                                            font=("Segoe UI", 9, "bold"))
@@ -380,28 +542,20 @@ class SimulationWindow(tk.Toplevel):
             self.header_canvas.create_line(x1, 0, x1, h, fill="#e5e7eb")
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
 
-    # --- fila de inicialización ---
+    # --- inicialización ---
     def _insert_initialization_row(self):
         eng = self.engine
         init = {
-            "iteracion": 0,
-            "evento": "INICIALIZACION",
-            "reloj": fmt(eng.clock, 2),
-            "lleg_tiempo": fmt(eng.t_inter, 2),
-            "lleg_minuto": fmt(eng.next_arrival, 2),
-
-            "trx_rnd": "", "trx_tipo": "",
-            "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
-
+            "iteracion": 0, "evento": "INICIALIZACION", "reloj": fmt(eng.clock, 2),
+            "lleg_tiempo": fmt(eng.t_inter, 2), "lleg_minuto": fmt(eng.next_arrival, 2),
+            "trx_rnd": "", "trx_tipo": "", "lee_rnd": "", "lee_lugar": "",
+            "lee_tiempo": "", "lee_fin": "",
             "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
             "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
-
-            "cola": 0,
-            "biblio_estado": "", "biblio_personas": 0,
+            "cola": 0, "biblio_estado": "", "biblio_personas": 0,
             "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
         }
-        # clientes vacíos
         for i in range(NUM_CLIENTES):
             init[f"c{i+1}_estado"] = ""
             init[f"c{i+1}_hora_llegada"] = ""
@@ -410,13 +564,18 @@ class SimulationWindow(tk.Toplevel):
         values = [init.get(cid, "") for cid in self.col_ids]
         self.tree.insert("", "end", values=values)
 
-    # --- acciones ---
-    def on_llegada(self):
-        row_dict = self.engine.llegada_cliente(self.next_cid)
-        self.next_cid += 1
+    # --- acción: siguiente evento ---
+    def on_next(self):
+        try:
+            if not self.engine.hay_mas():
+                messagebox.showinfo("Simulación", "No hay más eventos (límite de tiempo o iteraciones alcanzado).")
+                return
+            row_dict = self.engine.siguiente_evento()
+        except StopIteration as e:
+            messagebox.showinfo("Simulación", str(e))
+            return
         values = [row_dict.get(cid, "") for cid in self.col_ids]
         self.tree.insert("", "end", values=values)
-
 
 # ----------------- 1ª Ventana (config) -----------------
 class App(tk.Tk):
@@ -593,10 +752,10 @@ class App(tk.Tk):
         j_ini = need_int("j_inicio", "j (minuto de inicio)", 0, 10_000)
 
         if None not in (t_lim, j_ini) and j_ini >= t_lim:
-            errors.append("• j (minuto de inicio) debe ser menor que X (tiempo límite).")
+            errors.append("• j debe ser menor que X.")
             mark += ["j_inicio", "tiempo_limite"]
         if None not in (i_mos, n_max) and i_mos > n_max:
-            errors.append("• i no debería exceder N (cantidad de iteraciones).")
+            errors.append("• i no debería exceder N.")
             mark += ["i_mostrar", "iteraciones_max"]
 
         t_lleg = need_int("t_entre_llegadas", "Tiempo entre llegadas (min)", 1, 10_000)
@@ -604,18 +763,14 @@ class App(tk.Tk):
         p_dev = need_int("pct_devolver", "Devolver libros (%)", 0, 100)
         p_con = need_int("pct_consultar", "Consultar hacerse socio (%)", 0, 100)
         if None not in (p_ped, p_dev, p_con) and (p_ped + p_dev + p_con != 100):
-            errors.append(f"• La suma de motivos debe ser 100% (suma actual: {p_ped + p_dev + p_con}%).")
+            errors.append(f"• La suma de motivos debe ser 100% (ahora {p_ped+p_dev+p_con}%).")
             mark += ["pct_pedir", "pct_devolver", "pct_consultar"]
 
         a = need_int("uni_a", "Uniforme A (min)", 0, 10_000)
         b = need_int("uni_b", "Uniforme B (min)", 0, 10_000)
         if None not in (a, b):
-            if a == b:
-                errors.append("• En Uniforme(A, B) debe cumplirse A ≠ B.")
-                mark += ["uni_a", "uni_b"]
-            if a > b:
-                errors.append("• En Uniforme(A, B) debe cumplirse A < B.")
-                mark += ["uni_a", "uni_b"]
+            if a == b: errors.append("• En Uniforme(A,B) debe cumplirse A ≠ B."); mark += ["uni_a", "uni_b"]
+            if a > b: errors.append("• En Uniforme(A,B) debe cumplirse A < B."); mark += ["uni_a", "uni_b"]
 
         p_ret = need_int("pct_retira", "Se retira a leer en casa (%)", 0, 100)
         t_bib = need_int("t_lectura_biblio", "Tiempo fijo en biblioteca (min)", 1, 10_000)
@@ -623,7 +778,7 @@ class App(tk.Tk):
         if errors:
             for k in set(mark):
                 self.fields[k]["entry"].configure(style="Invalid.TEntry")
-            messagebox.showerror("Validación", "Revisá los siguientes puntos:\n\n" + "\n".join(errors))
+            messagebox.showerror("Validación", "Revisá:\n\n" + "\n".join(errors))
             return
 
         cfg = {
@@ -646,14 +801,11 @@ class App(tk.Tk):
             }
         }
 
-        # mostrar JSON (como antes)
         self.txt_out.delete("1.0", "end")
         pretty = json.dumps(cfg, indent=2, ensure_ascii=False)
         self.txt_out.insert("1.0", pretty)
-        self.clipboard_clear()
-        self.clipboard_append(pretty)
+        self.clipboard_clear(); self.clipboard_append(pretty)
 
-        # abrir vector de estado
         SimulationWindow(self, cfg, num_clientes=NUM_CLIENTES)
 
 if __name__ == "__main__":
