@@ -33,8 +33,8 @@ class Cliente:
         self.id = cid
         self.estado = "EN COLA"          # EN COLA | SIENDO ATENDIDO(i) | EC LEYENDO | DESTRUCCION
         self.hora_llegada = hora_llegada
-        self.a_que_fue_inicial = ""      # Pedir | Devolver | Consultar (se fija al entrar en servicio)
-        self.accion_actual = ""          # acción atendida ahora (puede ser Devolver al volver de leer)
+        self.a_que_fue_inicial = ""      # Pedir | Devolver | Consultar (solo primera vez)
+        self.accion_actual = ""          # acción que se atiende ahora (puede cambiar a "Devolver" al volver de leer)
         self.cuando_termina_leer = ""    # string p/mostrar
         self.fin_lect_num = None         # float para cálculos
         self.hora_entrada_cola = None    # cuando entra/retorna a cola
@@ -56,7 +56,7 @@ class SimulationEngine:
       - FIN_ATENCION_i (i=1,2)
       - FIN_LECTURA
     Empates: FIN_AT1, FIN_AT2, FIN_LECTURA(ID menor), LLEGADA.
-    No se guarda historial de filas: sólo la fila actual y el arrastre necesario.
+    Sin historial de filas: solo estado actual + arrastres.
     """
     def __init__(self, cfg):
         self.cfg = cfg
@@ -86,7 +86,8 @@ class SimulationEngine:
         self.bib = [Bibliotecario(), Bibliotecario()]
 
         # snapshots por cliente (para pintar columnas "CLIENTE N")
-        self.snapshots = {}                    # id -> {"estado","hora_llegada","a_que_fue","cuando_termina"}
+        # (contiene SOLO lo que debe verse en esta fila; se limpia y vuelve a llenar cada evento)
+        self.snapshots = {}
 
         # "solo esta fila" (mostrar RND/DEMORA/TRX de quien comienza justo ahora)
         self.last_b = {
@@ -103,6 +104,9 @@ class SimulationEngine:
         # lectores en biblioteca (contador eficiente)
         self.biblio_personas_cnt = 0
         self.biblio_estado = ""  # placeholder
+
+        # limpiar destrucciones tras emitir fila
+        self._to_clear_after_emit = set()
 
     # ---------- utilidades ----------
     def _elige_transaccion(self, r):
@@ -132,14 +136,23 @@ class SimulationEngine:
         return None
 
     def _sortear_transaccion_si_falta(self, c: Cliente):
-        """Define a_que_fue_inicial/accion_actual si aún no estaban asignadas; devuelve (trx_rnd, trx_tipo)."""
+        """
+        Define 'accion_actual' en el momento de entrar a servicio:
+         - Si ya tiene accion_actual (p.ej., vuelve de leer → 'Devolver'), se usa esa.
+         - Si no tiene, se fija (y también 'a_que_fue_inicial' si corresponde).
+        Devuelve (trx_rnd, trx_tipo_para_UI).
+        """
+        if c.accion_actual:
+            return "", c.accion_actual
         if not c.a_que_fue_inicial:
             r_trx = random.random()
             tipo = self._elige_transaccion(r_trx)
             c.a_que_fue_inicial = tipo
             c.accion_actual = tipo
             return fmt(r_trx, 4), tipo
-        return "", c.a_que_fue_inicial
+        # tenía 'a_que_fue_inicial' pero nunca fue atendido aún
+        c.accion_actual = c.a_que_fue_inicial
+        return "", c.accion_actual
 
     def _tomar_de_cola(self, idx_bib):
         """
@@ -150,9 +163,11 @@ class SimulationEngine:
             return False, "", "", "", ""
         b = self.bib[idx_bib]
         cid = self.cola.pop(0)
-        c = self.clientes[cid]
+        c = self.clientes.get(cid)
+        if c is None:
+            return False, "", "", "", ""  # seguridad
 
-        # entrar a servicio => sortear transacción si faltaba
+        # entrar a servicio => fijar accion_actual (si faltaba)
         trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
 
         c.estado = f"SIENDO ATENDIDO({idx_bib+1})"
@@ -165,17 +180,23 @@ class SimulationEngine:
         b.cliente_id = cid
         return True, b.rnd, b.demora, trx_rnd, trx_tipo
 
-    def _set_snapshot(self, cid, c):
-        # No sobreescribir si ya quedó en DESTRUCCION
-        prev = self.snapshots.get(cid)
-        if prev and prev.get("estado") == "DESTRUCCION":
-            return
+    def _set_snapshot(self, cid, c: Cliente):
+        # Este snapshot se usa SOLO para esta fila.
         self.snapshots[cid] = {
             "estado": c.estado,
             "hora_llegada": fmt(c.hora_llegada, 2),
-            "a_que_fue": c.a_que_fue_inicial,
+            # Mostrar la acción ACTUAL (no la inicial) para cumplir “FIN_LECTURA -> Devolver”
+            "a_que_fue": c.accion_actual,
             "cuando_termina": c.cuando_termina_leer
         }
+
+    def _clear_destroyed_from_snapshots_and_memory(self):
+        if not self._to_clear_after_emit:
+            return
+        for cid in list(self._to_clear_after_emit):
+            self.snapshots.pop(cid, None)   # deja columnas en blanco a partir de la siguiente fila
+            self.clientes.pop(cid, None)    # libera memoria
+        self._to_clear_after_emit.clear()
 
     # ---------- estadísticas (integración entre eventos) ----------
     def _integrar_estadisticas_hasta(self, new_time: float):
@@ -228,6 +249,10 @@ class SimulationEngine:
         # reset "solo esta fila"
         self.last_b = {1: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""},
                        2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}}
+        # limpiar destrucciones de la fila anterior
+        self._clear_destroyed_from_snapshots_and_memory()
+        # limpiar snapshots (para que no se “arrastren” textos de clientes)
+        self.snapshots.clear()
 
         cid = self.next_client_id; self.next_client_id += 1
         c = Cliente(cid, hora_llegada=self.clock)
@@ -242,7 +267,7 @@ class SimulationEngine:
             c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
             trx_rnd, trx_tipo = "", ""  # no hay transacción todavía
         else:
-            # entra directo a servicio → sortear transacción aquí
+            # entra directo a servicio → fijar acción
             trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
             c.estado = f"SIENDO ATENDIDO({asignado+1})"
             r_srv, demora = self._demora_por_transaccion(c.accion_actual)
@@ -300,27 +325,34 @@ class SimulationEngine:
         self.clock = t
         self.last_b = {1: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""},
                        2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}}
+        self._clear_destroyed_from_snapshots_and_memory()
+        self.snapshots.clear()
 
         cid = b.cliente_id
         c = self.clientes[cid]
 
-        # Decide destino
+        # Decide destino según ACCION ACTUAL
         lee_rnd = ""; lee_lugar = ""; lee_tiempo = ""; lee_fin = ""
-        if c.a_que_fue_inicial == "Pedir":
+        if c.accion_actual == "Pedir":
             r = random.random(); lee_rnd = fmt(r, 4)
             if r < self.p_retira:
+                # se va a casa
                 c.estado = "DESTRUCCION"
                 c.fin_lect_num = None; c.cuando_termina_leer = ""
+                self._to_clear_after_emit.add(c.id)
             else:
+                # lee en biblioteca
                 c.estado = "EC LEYENDO"
                 fin_lec = self.clock + self.t_lect_biblio
                 c.fin_lect_num = fin_lec
                 c.cuando_termina_leer = fmt(fin_lec, 2)
                 lee_lugar = "Biblioteca"; lee_tiempo = fmt(self.t_lect_biblio, 2); lee_fin = c.cuando_termina_leer
-                self.biblio_personas_cnt += 1  # entra a leer en sala
+                self.biblio_personas_cnt += 1
         else:
+            # ‘Devolver’ o ‘Consultar’ → destrucción
             c.estado = "DESTRUCCION"
             c.fin_lect_num = None; c.cuando_termina_leer = ""
+            self._to_clear_after_emit.add(c.id)
 
         self._set_snapshot(cid, c)
 
@@ -368,6 +400,8 @@ class SimulationEngine:
         self.clock = t
         self.last_b = {1: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""},
                        2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}}
+        self._clear_destroyed_from_snapshots_and_memory()
+        self.snapshots.clear()
 
         # Vuelve con "Devolver"
         c.fin_lect_num = None
@@ -400,7 +434,7 @@ class SimulationEngine:
             "b1_estado": self.bib[0].estado, "b1_rnd": self.last_b[1]["rnd"],
             "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
-            "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
+            "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
             "cola": self.cola_display,  # <-- ARRASTRE
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
@@ -431,6 +465,7 @@ class SimulationEngine:
 
     # ---------- acceso para UI ----------
     def get_snapshot_map(self):
+        # devuelve SOLO lo que corresponde a esta fila (no arrastra “DESTRUCCION”)
         out = {}
         for cid, snap in self.snapshots.items():
             out[f"c{cid}_estado"] = snap["estado"]
@@ -440,7 +475,8 @@ class SimulationEngine:
         return out
 
     def get_known_client_ids(self):
-        return sorted(self.snapshots.keys())
+        # columnas ya creadas no se eliminan; pero si no hay snapshot para un cliente, su fila queda en blanco.
+        return sorted(set(self.snapshots.keys()) | set(self.clientes.keys()))
 
 # ----------------- 2ª Ventana (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
@@ -479,7 +515,7 @@ class SimulationWindow(tk.Toplevel):
         add_col("lleg_tiempo", "TIEMPO", 90)              # solo en filas de llegada
         add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)   # se arrastra
         add_col("lleg_id", "ID Cliente", 110)
-        # TRANSACCION
+        # TRANSACCION (solo RND y Tipo; NUNCA ID)
         add_col("trx_rnd", "RND", 80)
         add_col("trx_tipo", "Tipo Transaccion", 160)
         # ¿Dónde Lee?
@@ -508,7 +544,7 @@ class SimulationWindow(tk.Toplevel):
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
 
-        # Grupos superiores
+        # Grupos superiores (aseguran que ID está en grupo de Llegada, no en Transacción)
         self.groups = [
             ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 5),
@@ -555,6 +591,8 @@ class SimulationWindow(tk.Toplevel):
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 28))
 
     def _add_client_columns(self, cid):
+        if any(c["id"] == f"c{cid}_estado" for c in self.columns):
+            return
         start_idx = len(self.columns)
         self.columns += [
             {"id": f"c{cid}_estado", "text": "ESTADO",  "w": 110},
@@ -600,7 +638,7 @@ class SimulationWindow(tk.Toplevel):
             "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
             "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
             "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
-            "cola": self.engine.cola_display,  # arrastre inicial = 0
+            "cola": self.engine.cola_display,
             "biblio_estado": "", "biblio_personas": 0,
             "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
@@ -617,20 +655,16 @@ class SimulationWindow(tk.Toplevel):
         except StopIteration as e:
             messagebox.showinfo("Simulación", str(e)); return
 
-        # agregar columnas para nuevos clientes si aparecieron
-        now_ids = self.engine.get_known_client_ids()
-        for cid in now_ids:
-            if cid not in self.known_client_ids:
-                self.known_client_ids.append(cid)
-                self._add_client_columns(cid)
+        # columnas por cada cliente que exista/haya aparecido esta fila
+        for cid in self.engine.get_known_client_ids():
+            self._add_client_columns(cid)
 
         snap = self.engine.get_snapshot_map()
 
-        # construimos values "al vuelo"; no guardamos historial en listas
         values = []
-        for col in self.col_ids:
+        for col in [c["id"] for c in self.columns]:
             if col.startswith("c"):
-                values.append(snap.get(col, ""))
+                values.append(snap.get(col, ""))  # si el cliente fue destruido y limpiado → queda en blanco
             else:
                 if col == "iteracion":
                     values.append(str(self.engine.iteration))
