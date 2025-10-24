@@ -287,6 +287,7 @@ class SimulationEngine:
 
         self.clientes[c.id] = c
         self._set_snapshot(c.id, c)
+        self._extender_snapshots_persistentes()
 
         self.next_arrival = self.clock + self.t_inter
 
@@ -356,6 +357,7 @@ class SimulationEngine:
             self._to_clear_after_emit.add(c.id)
 
         self._set_snapshot(cid, c)
+        self._extender_snapshots_persistentes()
 
         b.estado = "LIBRE"; b.rnd=""; b.demora=""; b.hora=""; b.hora_num=None; b.cliente_id=None
         asigno, rnd, demora, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
@@ -420,6 +422,7 @@ class SimulationEngine:
             c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
 
         self._set_snapshot(c.id, c)
+        self._extender_snapshots_persistentes()
 
         row = {
             "evento": "FIN_LECTURA",
@@ -441,6 +444,18 @@ class SimulationEngine:
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
         return row
+
+    def _extender_snapshots_persistentes(self):
+        """
+        Reinyecta en 'self.snapshots' los estados que deben verse de forma continua
+        entre filas (p.ej. EN COLA, EC LEYENDO y opcionalmente SIENDO ATENDIDO).
+        """
+        for cid, c in self.clientes.items():
+            if c is None:
+                continue
+            if c.estado in ("EN COLA", "EC LEYENDO", "SIENDO ATENDIDO(1)", "SIENDO ATENDIDO(2)"):
+                self._set_snapshot(cid, c)
+
 
     # ---------- paso general ----------
     def siguiente_evento(self):
