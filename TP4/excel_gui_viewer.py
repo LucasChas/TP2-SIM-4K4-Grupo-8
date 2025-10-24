@@ -85,8 +85,7 @@ class SimulationEngine:
         self.clientes = {}                     # id -> Cliente
         self.bib = [Bibliotecario(), Bibliotecario()]
 
-        # snapshots por cliente (para pintar columnas "CLIENTE N")
-        # (contiene SOLO lo que debe verse en esta fila; se limpia y vuelve a llenar cada evento)
+        # snapshots por cliente (solo lo que se debe ver en ESTA fila)
         self.snapshots = {}
 
         # "solo esta fila" (mostrar RND/DEMORA/TRX de quien comienza justo ahora)
@@ -95,18 +94,23 @@ class SimulationEngine:
             2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}
         }
 
-        # estadísticas acumuladas
+        # --- estadísticas integradas (tiempos continuos) ---
         self.est_b1_libre = 0.0
         self.est_b2_libre = 0.0
         self.est_bib_ocioso_acum = 0.0
-        self.est_cli_perm_acum = 0.0
+        self.est_cli_perm_acum = 0.0  # ∫ N(t) dt (por si quisieras L = A/(λ))
 
-        # lectores en biblioteca (contador eficiente)
+        # --- estadísticas discretas de clientes que completan ---
+        self.cli_completados = 0
+        self.sum_tiempo_en_sistema = 0.0
+
+        # lectores en biblioteca
         self.biblio_personas_cnt = 0
-        self.biblio_estado = ""  # placeholder
+        self.biblio_estado = ""
 
-        # limpiar destrucciones tras emitir fila
+        # housekeeping
         self._to_clear_after_emit = set()
+        self._finalizado = False
 
     # ---------- utilidades ----------
     def _elige_transaccion(self, r):
@@ -136,12 +140,6 @@ class SimulationEngine:
         return None
 
     def _sortear_transaccion_si_falta(self, c: Cliente):
-        """
-        Define 'accion_actual' en el momento de entrar a servicio:
-         - Si ya tiene accion_actual (p.ej., vuelve de leer → 'Devolver'), se usa esa.
-         - Si no tiene, se fija (y también 'a_que_fue_inicial' si corresponde).
-        Devuelve (trx_rnd, trx_tipo_para_UI).
-        """
         if c.accion_actual:
             return "", c.accion_actual
         if not c.a_que_fue_inicial:
@@ -150,28 +148,22 @@ class SimulationEngine:
             c.a_que_fue_inicial = tipo
             c.accion_actual = tipo
             return fmt(r_trx, 4), tipo
-        # tenía 'a_que_fue_inicial' pero nunca fue atendido aún
         c.accion_actual = c.a_que_fue_inicial
         return "", c.accion_actual
 
     def _tomar_de_cola(self, idx_bib):
-        """
-        Si hay cola, comienza a atender al primero en self.clock.
-        Devuelve (asigno, rnd_serv, demora, trx_rnd, trx_tipo).
-        """
         if not self.cola:
             return False, "", "", "", ""
         b = self.bib[idx_bib]
         cid = self.cola.pop(0)
         c = self.clientes.get(cid)
         if c is None:
-            return False, "", "", "", ""  # seguridad
+            return False, "", "", "", ""
 
-        # entrar a servicio => fijar accion_actual (si faltaba)
         trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
 
         c.estado = f"SIENDO ATENDIDO({idx_bib+1})"
-        self._set_snapshot(cid, c)  # persiste cambio
+        self._set_snapshot(cid, c)
 
         r_srv, demora = self._demora_por_transaccion(c.accion_actual)
         b.estado = "OCUPADO"
@@ -181,11 +173,9 @@ class SimulationEngine:
         return True, b.rnd, b.demora, trx_rnd, trx_tipo
 
     def _set_snapshot(self, cid, c: Cliente):
-        # Este snapshot se usa SOLO para esta fila.
         self.snapshots[cid] = {
             "estado": c.estado,
             "hora_llegada": fmt(c.hora_llegada, 2),
-            # Mostrar la acción ACTUAL (no la inicial) para cumplir “FIN_LECTURA -> Devolver”
             "a_que_fue": c.accion_actual,
             "cuando_termina": c.cuando_termina_leer
         }
@@ -194,8 +184,8 @@ class SimulationEngine:
         if not self._to_clear_after_emit:
             return
         for cid in list(self._to_clear_after_emit):
-            self.snapshots.pop(cid, None)   # deja columnas en blanco a partir de la siguiente fila
-            self.clientes.pop(cid, None)    # libera memoria
+            self.snapshots.pop(cid, None)
+            self.clientes.pop(cid, None)
         self._to_clear_after_emit.clear()
 
     # ---------- estadísticas (integración entre eventos) ----------
@@ -239,6 +229,25 @@ class SimulationEngine:
         t, *_ = ne
         return self.iteration < self.iter_limit and t <= self.time_limit
 
+    # ---------- helpers de estadísticas para la UI ----------
+    def snapshot_estadisticas(self):
+        """Estadísticas a 'ahora' (sin integrar hasta X)."""
+        prom_permanencia = (self.sum_tiempo_en_sistema / self.cli_completados) if self.cli_completados > 0 else 0.0
+        return {
+            "clientes_completados": self.cli_completados,
+            "prom_permanencia": prom_permanencia,
+            "b1_ocioso": self.est_b1_libre,
+            "b2_ocioso": self.est_b2_libre,
+            "total_ocioso": self.est_b1_libre + self.est_b2_libre,
+        }
+
+    def finalizar_estadisticas(self):
+        """Integra hasta el tiempo límite X (una sola vez) y devuelve el resumen final."""
+        if not self._finalizado and self.last_clock < self.time_limit:
+            self._integrar_estadisticas_hasta(self.time_limit)
+        self._finalizado = True
+        return self.snapshot_estadisticas()
+
     # ---------- eventos ----------
     def _evento_llegada(self):
         t = self.next_arrival
@@ -246,18 +255,14 @@ class SimulationEngine:
 
         self.iteration += 1
         self.clock = t
-        # reset "solo esta fila"
         self.last_b = {1: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""},
                        2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}}
-        # limpiar destrucciones de la fila anterior
         self._clear_destroyed_from_snapshots_and_memory()
-        # limpiar snapshots (para que no se “arrastren” textos de clientes)
         self.snapshots.clear()
 
         cid = self.next_client_id; self.next_client_id += 1
         c = Cliente(cid, hora_llegada=self.clock)
 
-        # al llegar: NO decidir transacción aún
         asignado = None
         if not self._hay_cola():
             libre = self._primer_bib_libre()
@@ -265,9 +270,8 @@ class SimulationEngine:
 
         if asignado is None:
             c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
-            trx_rnd, trx_tipo = "", ""  # no hay transacción todavía
+            trx_rnd, trx_tipo = "", ""
         else:
-            # entra directo a servicio → fijar acción
             trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
             c.estado = f"SIENDO ATENDIDO({asignado+1})"
             r_srv, demora = self._demora_por_transaccion(c.accion_actual)
@@ -276,7 +280,6 @@ class SimulationEngine:
             b.rnd = fmt(r_srv); b.demora = fmt(demora)
             b.hora_num = self.clock + demora; b.hora = fmt(b.hora_num)
             b.cliente_id = c.id
-            # para mostrar en esta fila
             self.last_b[asignado+1]["rnd"] = b.rnd
             self.last_b[asignado+1]["demora"] = b.demora
             self.last_b[asignado+1]["trx_rnd"] = trx_rnd
@@ -285,15 +288,13 @@ class SimulationEngine:
         self.clientes[c.id] = c
         self._set_snapshot(c.id, c)
 
-        # próxima llegada (solo en llegada)
         self.next_arrival = self.clock + self.t_inter
 
-        # fila (COLA arrastrada del estado previo)
         row = {
             "evento": f"LLEGADA_CLIENTE({cid})",
             "reloj": fmt(self.clock, 2),
-            "lleg_tiempo": fmt(self.t_inter, 2),       # SOLO en llegada
-            "lleg_minuto": fmt(self.next_arrival, 2),  # se arrastra hacia adelante
+            "lleg_tiempo": fmt(self.t_inter, 2),
+            "lleg_minuto": fmt(self.next_arrival, 2),
             "lleg_id": str(cid),
             "trx_rnd": trx_rnd,
             "trx_tipo": trx_tipo,
@@ -302,7 +303,7 @@ class SimulationEngine:
             "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
-            "cola": self.cola_display,  # <-- ARRASTRE
+            "cola": str(self.cola_display),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -310,8 +311,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-
-        # actualizar arrastre para la próxima fila
         self.cola_display = len(self.cola)
         return row
 
@@ -331,14 +330,15 @@ class SimulationEngine:
         cid = b.cliente_id
         c = self.clientes[cid]
 
-        # Decide destino según ACCION ACTUAL
         lee_rnd = ""; lee_lugar = ""; lee_tiempo = ""; lee_fin = ""
         if c.accion_actual == "Pedir":
             r = random.random(); lee_rnd = fmt(r, 4)
             if r < self.p_retira:
-                # se va a casa
+                # se va a casa → SALE DEL SISTEMA
                 c.estado = "DESTRUCCION"
                 c.fin_lect_num = None; c.cuando_termina_leer = ""
+                self.sum_tiempo_en_sistema += (self.clock - c.hora_llegada)
+                self.cli_completados += 1
                 self._to_clear_after_emit.add(c.id)
             else:
                 # lee en biblioteca
@@ -349,14 +349,15 @@ class SimulationEngine:
                 lee_lugar = "Biblioteca"; lee_tiempo = fmt(self.t_lect_biblio, 2); lee_fin = c.cuando_termina_leer
                 self.biblio_personas_cnt += 1
         else:
-            # ‘Devolver’ o ‘Consultar’ → destrucción
+            # Devolver o Consultar → SALE DEL SISTEMA
             c.estado = "DESTRUCCION"
             c.fin_lect_num = None; c.cuando_termina_leer = ""
+            self.sum_tiempo_en_sistema += (self.clock - c.hora_llegada)
+            self.cli_completados += 1
             self._to_clear_after_emit.add(c.id)
 
         self._set_snapshot(cid, c)
 
-        # liberar b y tomar de cola (si hay, aquí se fija transacción del nuevo que entra)
         b.estado = "LIBRE"; b.rnd=""; b.demora=""; b.hora=""; b.hora_num=None; b.cliente_id=None
         asigno, rnd, demora, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
         if asigno:
@@ -366,19 +367,19 @@ class SimulationEngine:
             self.last_b[i]["trx_tipo"] = trx_tipo
 
         row = {
-            "evento": f"FIN_ATENCION_{i}({cid})",
+            "evento": f"FIN_ATENCION_{i}",
             "reloj": fmt(self.clock, 2),
             "lleg_tiempo": "",
             "lleg_minuto": fmt(self.next_arrival,2),
             "lleg_id": "",
-            "trx_rnd": self.last_b[i]["trx_rnd"],   # si se tomó a alguien de la cola
+            "trx_rnd": self.last_b[i]["trx_rnd"],
             "trx_tipo": self.last_b[i]["trx_tipo"],
             "lee_rnd": lee_rnd, "lee_lugar": lee_lugar, "lee_tiempo": lee_tiempo, "lee_fin": lee_fin,
             "b1_estado": self.bib[0].estado, "b1_rnd": self.last_b[1]["rnd"],
             "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
-            "cola": self.cola_display,  # <-- ARRASTRE
+            "cola": str(self.cola_display),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -386,8 +387,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-
-        # actualizar arrastre para la próxima fila
         self.cola_display = len(self.cola)
         return row
 
@@ -407,7 +406,7 @@ class SimulationEngine:
         c.fin_lect_num = None
         c.cuando_termina_leer = ""
         c.accion_actual = "Devolver"
-        self.biblio_personas_cnt = max(0, self.biblio_personas_cnt - 1)  # deja de leer en sala
+        self.biblio_personas_cnt = max(0, self.biblio_personas_cnt - 1)
 
         libre = self._primer_bib_libre()
         if libre is not None:
@@ -417,7 +416,7 @@ class SimulationEngine:
             b.estado = "OCUPADO"; b.rnd = fmt(r_srv); b.demora = fmt(demora)
             b.hora_num = self.clock + demora; b.hora = fmt(b.hora_num); b.cliente_id = c.id
             self.last_b[libre+1]["rnd"] = b.rnd; self.last_b[libre+1]["demora"] = b.demora
-            self.last_b[libre+1]["trx_rnd"] = ""   # no corresponde sorteo aquí
+            self.last_b[libre+1]["trx_rnd"] = ""
             self.last_b[libre+1]["trx_tipo"] = "Devolver"
         else:
             c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
@@ -425,17 +424,17 @@ class SimulationEngine:
         self._set_snapshot(c.id, c)
 
         row = {
-            "evento": f"FIN_LECTURA({cid})",
+            "evento": "FIN_LECTURA",
             "reloj": fmt(self.clock, 2),
             "lleg_tiempo": "", "lleg_minuto": fmt(self.next_arrival,2), "lleg_id": "",
             "trx_rnd": "" if libre is None else self.last_b[libre+1]["trx_rnd"],
             "trx_tipo": "" if libre is None else self.last_b[libre+1]["trx_tipo"],
             "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
             "b1_estado": self.bib[0].estado, "b1_rnd": self.last_b[1]["rnd"],
-            "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
+            "b1_demora": self.bib[0].demora, "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
-            "cola": self.cola_display,  # <-- ARRASTRE
+            "cola": str(self.cola_display),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -443,8 +442,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-
-        # actualizar arrastre para la próxima fila
         self.cola_display = len(self.cola)
         return row
 
@@ -465,7 +462,6 @@ class SimulationEngine:
 
     # ---------- acceso para UI ----------
     def get_snapshot_map(self):
-        # devuelve SOLO lo que corresponde a esta fila (no arrastra “DESTRUCCION”)
         out = {}
         for cid, snap in self.snapshots.items():
             out[f"c{cid}_estado"] = snap["estado"]
@@ -475,8 +471,34 @@ class SimulationEngine:
         return out
 
     def get_known_client_ids(self):
-        # columnas ya creadas no se eliminan; pero si no hay snapshot para un cliente, su fila queda en blanco.
         return sorted(set(self.snapshots.keys()) | set(self.clientes.keys()))
+
+# ----------------- Ventana de Estadísticas -----------------
+class StatsWindow(tk.Toplevel):
+    def __init__(self, master, engine: SimulationEngine):
+        super().__init__(master)
+        self.title("Estadísticas")
+        self.geometry("360x210")
+        self.resizable(False, False)
+        self.engine = engine
+
+        frm = ttk.Frame(self, padding=12); frm.pack(fill="both", expand=True)
+        self.lbl_cli = ttk.Label(frm, text="Clientes completados: 0"); self.lbl_cli.pack(anchor="w")
+        self.lbl_prom = ttk.Label(frm, text="Promedio permanencia: 0.00 min"); self.lbl_prom.pack(anchor="w", pady=(2,0))
+        self.lbl_b1 = ttk.Label(frm, text="Ocioso B1: 0.00 min"); self.lbl_b1.pack(anchor="w", pady=(2,0))
+        self.lbl_b2 = ttk.Label(frm, text="Ocioso B2: 0.00 min"); self.lbl_b2.pack(anchor="w", pady=(2,0))
+        self.lbl_tot = ttk.Label(frm, text="Ocioso TOTAL: 0.00 min"); self.lbl_tot.pack(anchor="w", pady=(2,0))
+
+        btn = ttk.Button(frm, text="Actualizar", command=self.refresh); btn.pack(anchor="e", pady=(10,0))
+        self.refresh()
+
+    def refresh(self, final=False):
+        stats = self.engine.finalizar_estadisticas() if final else self.engine.snapshot_estadisticas()
+        self.lbl_cli.configure(text=f"Clientes completados: {stats['clientes_completados']}")
+        self.lbl_prom.configure(text=f"Promedio permanencia: {stats['prom_permanencia']:.2f} min")
+        self.lbl_b1.configure(text=f"Ocioso B1: {stats['b1_ocioso']:.2f} min")
+        self.lbl_b2.configure(text=f"Ocioso B2: {stats['b2_ocioso']:.2f} min")
+        self.lbl_tot.configure(text=f"Ocioso TOTAL: {stats['total_ocioso']:.2f} min")
 
 # ----------------- 2ª Ventana (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
@@ -487,6 +509,7 @@ class SimulationWindow(tk.Toplevel):
         self.minsize(1200, 560)
 
         self.engine = SimulationEngine(config_dict)
+        self.stats_win = None  # referencia a la pantallita
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
@@ -502,6 +525,7 @@ class SimulationWindow(tk.Toplevel):
                   f"| t_entre_llegadas={config_dict['llegadas']['tiempo_entre_llegadas_min']} min"),
             foreground="#374151"
         ); resumen.pack(side="left")
+        ttk.Button(top, text="Estadísticas", command=self.open_stats).pack(side="right", padx=(6,0))
         ttk.Button(top, text="Siguiente evento", command=self.on_next).pack(side="right")
 
         # ------ columnas fijas ------
@@ -512,10 +536,10 @@ class SimulationWindow(tk.Toplevel):
         add_col("evento", "Evento", 180)
         add_col("reloj", "Reloj (minutos)", 130)
         # LLEGADA_CLIENTE
-        add_col("lleg_tiempo", "TIEMPO", 90)              # solo en filas de llegada
-        add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)   # se arrastra
+        add_col("lleg_tiempo", "TIEMPO", 90)
+        add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)
         add_col("lleg_id", "ID Cliente", 110)
-        # TRANSACCION (solo RND y Tipo; NUNCA ID)
+        # TRANSACCION
         add_col("trx_rnd", "RND", 80)
         add_col("trx_tipo", "Tipo Transaccion", 160)
         # ¿Dónde Lee?
@@ -538,13 +562,12 @@ class SimulationWindow(tk.Toplevel):
         # BIBLIOTECA
         add_col("biblio_estado", "Estado", 95)
         add_col("biblio_personas", "Personas en la biblioteca (MAXIMO 20)", 270)
-        # ESTADISTICAS
+        # ESTADISTICAS (acumuladores visibles)
         add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO1", 230)
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
 
-        # Grupos superiores (aseguran que ID está en grupo de Llegada, no en Transacción)
         self.groups = [
             ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 5),
@@ -581,6 +604,17 @@ class SimulationWindow(tk.Toplevel):
         self._apply_columns()
         self._draw_group_headers()
         self._insert_initialization_row()
+
+    def open_stats(self):
+        if self.stats_win is None or not self.stats_win.winfo_exists():
+            self.stats_win = StatsWindow(self, self.engine)
+        else:
+            self.stats_win.lift()
+            self.stats_win.refresh(final=False)
+
+    def _refresh_stats_window(self, final=False):
+        if self.stats_win is not None and self.stats_win.winfo_exists():
+            self.stats_win.refresh(final=final)
 
     def _apply_columns(self):
         self.col_ids = [c["id"] for c in self.columns]
@@ -638,7 +672,7 @@ class SimulationWindow(tk.Toplevel):
             "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
             "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
             "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
-            "cola": self.engine.cola_display,
+            "cola":  str(self.engine.cola_display),
             "biblio_estado": "", "biblio_personas": 0,
             "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
@@ -649,11 +683,20 @@ class SimulationWindow(tk.Toplevel):
     def on_next(self):
         try:
             if not self.engine.hay_mas():
-                messagebox.showinfo("Simulación", "No hay más eventos (límite de tiempo o iteraciones alcanzado).")
+                # si no hay más, integro hasta X y refresco estadísticas finales
+                stats = self.engine.finalizar_estadisticas()
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+                messagebox.showinfo(
+                    "Fin de simulación",
+                    "No hay más eventos (límite de tiempo o iteraciones alcanzado)."
+                )
                 return
             row = self.engine.siguiente_evento()
         except StopIteration as e:
-            messagebox.showinfo("Simulación", str(e)); return
+            self.open_stats()
+            self._refresh_stats_window(final=True)
+            messagebox.showinfo("Fin de simulación", str(e)); return
 
         # columnas por cada cliente que exista/haya aparecido esta fila
         for cid in self.engine.get_known_client_ids():
@@ -664,13 +707,17 @@ class SimulationWindow(tk.Toplevel):
         values = []
         for col in [c["id"] for c in self.columns]:
             if col.startswith("c"):
-                values.append(snap.get(col, ""))  # si el cliente fue destruido y limpiado → queda en blanco
+                values.append(snap.get(col, ""))
             else:
                 if col == "iteracion":
                     values.append(str(self.engine.iteration))
                 else:
-                    values.append(row.get(col, ""))
+                    v = row.get(col, "")
+                    values.append("" if v == "" else str(v))
         self.tree.insert("", "end", values=values)
+
+        # refrescar pantallita si está abierta
+        self._refresh_stats_window(final=False)
 
 # ----------------- 1ª Ventana (config) -----------------
 class App(tk.Tk):
