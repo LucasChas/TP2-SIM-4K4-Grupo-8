@@ -303,7 +303,7 @@ class SimulationEngine:
             "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
-            "cola": str(self.cola_display),
+            "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -311,7 +311,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-        self.cola_display = len(self.cola)
         return row
 
     def _evento_fin_atencion(self, i):
@@ -379,7 +378,7 @@ class SimulationEngine:
             "b1_demora": self.last_b[1]["demora"], "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
-            "cola": str(self.cola_display),
+            "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -387,7 +386,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-        self.cola_display = len(self.cola)
         return row
 
     def _evento_fin_lectura(self, cid):
@@ -434,7 +432,7 @@ class SimulationEngine:
             "b1_demora": self.bib[0].demora, "b1_hora": self.bib[0].hora,
             "b2_estado": self.bib[1].estado, "b2_rnd": self.last_b[2]["rnd"],
             "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
-            "cola": str(self.cola_display),
+            "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self.biblio_personas_cnt,
             "est_b1_libre": fmt(self.est_b1_libre),
@@ -442,7 +440,6 @@ class SimulationEngine:
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
             "est_cli_perm_acum": fmt(self.est_cli_perm_acum),
         }
-        self.cola_display = len(self.cola)
         return row
 
     # ---------- paso general ----------
@@ -672,7 +669,7 @@ class SimulationWindow(tk.Toplevel):
             "lee_rnd": "", "lee_lugar": "", "lee_tiempo": "", "lee_fin": "",
             "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
             "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
-            "cola":  str(self.engine.cola_display),
+            "cola":  len(self.engine.cola),
             "biblio_estado": "", "biblio_personas": 0,
             "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
@@ -706,7 +703,7 @@ class SimulationWindow(tk.Toplevel):
 
         values = []
         for col in [c["id"] for c in self.columns]:
-            if col.startswith("c"):
+            if col.startswith("c") and len(col) > 1 and col[1].isdigit():
                 values.append(snap.get(col, ""))
             else:
                 if col == "iteracion":
