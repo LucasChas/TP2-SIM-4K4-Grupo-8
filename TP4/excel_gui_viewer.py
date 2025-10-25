@@ -49,6 +49,7 @@ class Bibliotecario:
         self.cliente_id = None
 
 # ----------------- Motor de simulación -----------------
+MAX_CAPACITY = 20 # Capacidad total de personas (Clientes + 2 Bibliotecarios)
 class SimulationEngine:
     """
     Avance por 'siguiente evento':
@@ -60,6 +61,7 @@ class SimulationEngine:
     """
     def __init__(self, cfg):
         self.cfg = cfg
+        self.MAX_CLIENT_CAPACITY = MAX_CAPACITY - 2  # 18 Clientes max (20 total)
 
         # parámetros
         self.t_inter = cfg["llegadas"]["tiempo_entre_llegadas_min"]
@@ -107,6 +109,7 @@ class SimulationEngine:
         # lectores en biblioteca
         self.biblio_personas_cnt = 0
         self.biblio_estado = ""
+        self._update_biblio_estado()
 
         # housekeeping
         self._to_clear_after_emit = set()
@@ -173,10 +176,17 @@ class SimulationEngine:
         return True, b.rnd, b.demora, trx_rnd, trx_tipo
 
     def _set_snapshot(self, cid, c: Cliente):
+        if c.estado == "DESTRUCCION":
+            hora_llegada_display = ""
+            a_que_fue_display = ""
+        else:
+            hora_llegada_display = fmt(c.hora_llegada, 2)
+            a_que_fue_display = c.accion_actual or c.a_que_fue_inicial
+
         self.snapshots[cid] = {
             "estado": c.estado,
-            "hora_llegada": fmt(c.hora_llegada, 2),
-            "a_que_fue": c.accion_actual,
+            "hora_llegada": hora_llegada_display,
+            "a_que_fue": a_que_fue_display,
             "cuando_termina": c.cuando_termina_leer
         }
 
@@ -187,6 +197,22 @@ class SimulationEngine:
             self.snapshots.pop(cid, None)
             self.clientes.pop(cid, None)
         self._to_clear_after_emit.clear()
+
+    def _current_clients_occupying_spot(self) -> int:
+        """Clientes que están en cola, siendo atendidos o leyendo (ocupan un 'spot' de los 18)."""
+        num_in_service = (1 if self.bib[0].estado == "OCUPADO" else 0) + (1 if self.bib[1].estado == "OCUPADO" else 0)
+        # El numero de clientes totales es: Cola + En Servicio + Leyendo
+        return len(self.cola) + num_in_service + self.biblio_personas_cnt
+
+    def _total_people_present_for_display(self) -> int:
+        return 2 + self._current_clients_occupying_spot()
+
+    def _update_biblio_estado(self):
+        """Actualiza el estado de la biblioteca (Abierta/Cerrada) según la capacidad."""
+        if self._total_people_present_for_display() >= MAX_CAPACITY:
+            self.biblio_estado = "Cerrada"
+        else:
+            self.biblio_estado = "Abierta"
 
     # ---------- estadísticas (integración entre eventos) ----------
     def _integrar_estadisticas_hasta(self, new_time: float):
@@ -262,35 +288,50 @@ class SimulationEngine:
 
         cid = self.next_client_id; self.next_client_id += 1
         c = Cliente(cid, hora_llegada=self.clock)
-
+        trx_rnd = ""
+        trx_tipo = ""
         asignado = None
-        if not self._hay_cola():
-            libre = self._primer_bib_libre()
-            if libre is not None: asignado = libre
 
-        if asignado is None:
-            c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
-            trx_rnd, trx_tipo = "", ""
+        # Cliente no entra si el límite de 20 personas (18 clientes) está alcanzado
+        if self._current_clients_occupying_spot() >= self.MAX_CLIENT_CAPACITY:
+            c.estado = "DESTRUCCION"
+            c.fin_lect_num = None
+            c.cuando_termina_leer = "CLIENTE DESTRUIDO (CAPACIDAD MAXIMA)"
+            # Se registra la llegada y se programa para la limpieza
+            self._to_clear_after_emit.add(c.id)
+            self.clientes[c.id] = c
+            self._set_snapshot(c.id, c)
+            self._extender_snapshots_persistentes()
+            self.next_arrival = self.clock + self.t_inter
         else:
-            trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
-            c.estado = f"SIENDO ATENDIDO({asignado+1})"
-            r_srv, demora = self._demora_por_transaccion(c.accion_actual)
-            b = self.bib[asignado]
-            b.estado = "OCUPADO"
-            b.rnd = fmt(r_srv); b.demora = fmt(demora)
-            b.hora_num = self.clock + demora; b.hora = fmt(b.hora_num)
-            b.cliente_id = c.id
-            self.last_b[asignado+1]["rnd"] = b.rnd
-            self.last_b[asignado+1]["demora"] = b.demora
-            self.last_b[asignado+1]["trx_rnd"] = trx_rnd
-            self.last_b[asignado+1]["trx_tipo"] = trx_tipo
+            if not self._hay_cola():
+                libre = self._primer_bib_libre()
+                if libre is not None: asignado = libre
 
-        self.clientes[c.id] = c
-        self._set_snapshot(c.id, c)
-        self._extender_snapshots_persistentes()
+            if asignado is None:
+                c.estado = "EN COLA"; c.hora_entrada_cola = self.clock; self.cola.append(c.id)
+            else:
+                trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
+                c.estado = f"SIENDO ATENDIDO({asignado + 1})"
+                r_srv, demora = self._demora_por_transaccion(c.accion_actual)
+                b = self.bib[asignado]
+                b.estado = "OCUPADO"
+                b.rnd = fmt(r_srv);
+                b.demora = fmt(demora)
+                b.hora_num = self.clock + demora;
+                b.hora = fmt(b.hora_num)
+                b.cliente_id = c.id
+                self.last_b[asignado + 1]["rnd"] = b.rnd
+                self.last_b[asignado + 1]["demora"] = b.demora
+                self.last_b[asignado + 1]["trx_rnd"] = trx_rnd
+                self.last_b[asignado + 1]["trx_tipo"] = trx_tipo
 
-        self.next_arrival = self.clock + self.t_inter
+            self.clientes[c.id] = c
+            self._set_snapshot(c.id, c)
+            self._extender_snapshots_persistentes()
 
+            self.next_arrival = self.clock + self.t_inter
+        self._update_biblio_estado()
         row = {
             "evento": f"LLEGADA_CLIENTE({cid})",
             "reloj": fmt(self.clock, 2),
@@ -306,7 +347,7 @@ class SimulationEngine:
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
             "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
-            "biblio_personas": self.biblio_personas_cnt,
+            "biblio_personas": self._total_people_present_for_display(),
             "est_b1_libre": fmt(self.est_b1_libre),
             "est_b2_libre": fmt(self.est_b2_libre),
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
@@ -366,9 +407,9 @@ class SimulationEngine:
             self.last_b[i]["demora"] = demora
             self.last_b[i]["trx_rnd"] = trx_rnd
             self.last_b[i]["trx_tipo"] = trx_tipo
-
+        self._update_biblio_estado()
         row = {
-            "evento": f"FIN_ATENCION_{i}",
+            "evento": f"FIN_ATENCION_{i}({cid})",
             "reloj": fmt(self.clock, 2),
             "lleg_tiempo": "",
             "lleg_minuto": fmt(self.next_arrival,2),
@@ -382,7 +423,7 @@ class SimulationEngine:
             "b2_demora": self.last_b[2]["demora"], "b2_hora": self.bib[1].hora,
             "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
-            "biblio_personas": self.biblio_personas_cnt,
+            "biblio_personas": self._total_people_present_for_display(),
             "est_b1_libre": fmt(self.est_b1_libre),
             "est_b2_libre": fmt(self.est_b2_libre),
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
@@ -401,6 +442,7 @@ class SimulationEngine:
                        2: {"rnd":"", "demora":"", "trx_rnd":"", "trx_tipo":""}}
         self._clear_destroyed_from_snapshots_and_memory()
         self.snapshots.clear()
+
 
         # Vuelve con "Devolver"
         c.fin_lect_num = None
@@ -423,9 +465,9 @@ class SimulationEngine:
 
         self._set_snapshot(c.id, c)
         self._extender_snapshots_persistentes()
-
+        self._update_biblio_estado()
         row = {
-            "evento": "FIN_LECTURA",
+            "evento": f"FIN_LECTURA({cid})",
             "reloj": fmt(self.clock, 2),
             "lleg_tiempo": "", "lleg_minuto": fmt(self.next_arrival,2), "lleg_id": "",
             "trx_rnd": "" if libre is None else self.last_b[libre+1]["trx_rnd"],
@@ -437,7 +479,7 @@ class SimulationEngine:
             "b2_demora": self.bib[1].demora, "b2_hora": self.bib[1].hora,
             "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
-            "biblio_personas": self.biblio_personas_cnt,
+            "biblio_personas": self._total_people_present_for_display(),
             "est_b1_libre": fmt(self.est_b1_libre),
             "est_b2_libre": fmt(self.est_b2_libre),
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
@@ -501,7 +543,7 @@ class StatsWindow(tk.Toplevel):
         self.lbl_b2 = ttk.Label(frm, text="Ocioso B2: 0.00 min"); self.lbl_b2.pack(anchor="w", pady=(2,0))
         self.lbl_tot = ttk.Label(frm, text="Ocioso TOTAL: 0.00 min"); self.lbl_tot.pack(anchor="w", pady=(2,0))
 
-        btn = ttk.Button(frm, text="Actualizar", command=self.refresh); btn.pack(anchor="e", pady=(10,0))
+        #btn = ttk.Button(frm, text="Actualizar", command=self.refresh); btn.pack(anchor="e", pady=(10,0))
         self.refresh()
 
     def refresh(self, final=False):
@@ -666,17 +708,39 @@ class SimulationWindow(tk.Toplevel):
 
     def _draw_group_headers(self):
         self.header_canvas.delete("all")
-        xs = self._col_x_positions(); h = 28
-        for text, i0, i1 in self.groups:
-            x0 = xs[i0][0]; x1 = xs[i1][1]
-            self.header_canvas.create_rectangle(x0, 0, x1, h, fill=GROUP_BG, outline=GROUP_BORDER)
-            self.header_canvas.create_text((x0 + x1) / 2, h / 2, text=text, anchor="center", font=("Segoe UI", 9, "bold"))
-        for x0, x1 in xs:
-            self.header_canvas.create_line(x1, 0, x1, h, fill="#e5e7eb")
-        self.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h)))
+        xs = self._col_x_positions()
+        h = 28
 
+        group_bg_color = GROUP_BG
+        group_border_color = GROUP_BORDER
+        fine_line_color = "#e5e7eb"
+        group_separator_color = "#555555"
+        group_boundaries = set()
+
+        for idx, (text, i0, i1) in enumerate(self.groups):
+            if not text: continue
+            x0 = xs[i0][0]
+            x1 = xs[i1][1]
+
+            current_bg = group_bg_color
+            self.header_canvas.create_rectangle(x0, 0, x1, h, fill=current_bg, outline=group_border_color)
+            self.header_canvas.create_text((x0 + x1) / 2, h / 2, text=text, anchor="center",
+                                           font=("Segoe UI", 9, "bold"))
+            self.header_canvas.create_line(x0, h - 1, x1, h - 1, fill=group_separator_color, width=1)  # Línea abajo
+            group_boundaries.add(x0)
+            group_boundaries.add(x1)
+
+        for _, x1 in xs:
+            self.header_canvas.create_line(x1, 0, x1, h, fill=fine_line_color)
+        for x_boundary in sorted(list(group_boundaries)):
+            if x_boundary == 0: continue
+            self.header_canvas.create_line(x_boundary, 0, x_boundary, h, fill=group_separator_color, width=1)
+
+        self.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h)))
+        self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
     def _insert_initialization_row(self):
         eng = self.engine
+        eng._update_biblio_estado()
         base = {
             "iteracion": 0, "evento": "INICIALIZACION", "reloj": fmt(eng.clock,2),
             "lleg_tiempo": "", "lleg_minuto": fmt(eng.next_arrival,2), "lleg_id": "",
@@ -685,7 +749,7 @@ class SimulationWindow(tk.Toplevel):
             "b1_estado": "LIBRE", "b1_rnd": "", "b1_demora": "", "b1_hora": "",
             "b2_estado": "LIBRE", "b2_rnd": "", "b2_demora": "", "b2_hora": "",
             "cola":  len(self.engine.cola),
-            "biblio_estado": "", "biblio_personas": 0,
+            "biblio_estado": eng.biblio_estado, "biblio_personas": eng._total_people_present_for_display(),
             "est_b1_libre": fmt(0), "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0), "est_cli_perm_acum": fmt(0),
         }
