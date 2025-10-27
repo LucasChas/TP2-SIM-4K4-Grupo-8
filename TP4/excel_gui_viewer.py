@@ -1248,11 +1248,50 @@ class App(tk.Tk):
         self.style.configure("Ok.TLabel", foreground="#15803d")
         self.style.configure("Bad.TLabel", foreground="#dc2626")
 
+        # --- INICIO: MODIFICACIÓN PARA SCROLLBAR ---
+
+        # 1. Hacemos que la fila y columna principal de la ventana (self) se expandan
+        self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
-        root = ttk.Frame(self, padding=12)
-        root.grid(row=0, column=0, sticky="nsew")
+        # 2. Frame principal que contendrá el canvas y el scrollbar
+        main_frame = ttk.Frame(self)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+
+        # 3. Hacemos que la fila 0 y col 0 de main_frame se expandan
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        # 4. Canvas y Scrollbar
+        self.canvas = tk.Canvas(main_frame)
+        self.scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # 5. Posicionamos con grid
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # 6. El frame INTERNO ('root') que contendrá los widgets
+        #    Le damos padding aquí en lugar de al main_frame
+        root = ttk.Frame(self.canvas, padding=12)
+
+        # 7. Creamos la "ventana" del canvas
+        self.canvas_window = self.canvas.create_window((0, 0), window=root, anchor="nw")
+
+        # Hacemos que la columna 0 de 'root' se expanda (para los LabelFrames)
         root.columnconfigure(0, weight=1)
+
+        # Bindings
+        root.bind("<Configure>", self.on_frame_configure)
+        self.canvas.bind("<Configure>", self.on_canvas_configure)
+        self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self.on_mousewheel_linux)
+        self.canvas.bind_all("<Button-5>", self.on_mousewheel_linux)
+
+        # --- FIN: MODIFICACIÓN PARA SCROLLBAR ---
+
+        # El 'root' original ahora es el frame scrolleable
+        # El resto del código no necesita cambios, ya que usa 'root'
 
         self.fields = {}
 
@@ -1333,7 +1372,7 @@ class App(tk.Tk):
         # --- 6) Resultado JSON ---
         salida = ttk.LabelFrame(root, text="6) Resultado")
         salida.grid(row=5, column=0, sticky="nsew", pady=(0, 8))
-        root.rowconfigure(5, weight=1)
+        # root.rowconfigure(5, weight=1) # No es necesario en un frame scrolleable
         salida.columnconfigure(0, weight=1)
 
         self.txt_out = tk.Text(salida, height=10)
@@ -1408,6 +1447,30 @@ class App(tk.Tk):
         p = 0 if p is None else p
         queda = max(0, min(100, 100 - p))
         self.lbl_queda.configure(text=str(queda))
+
+    # --- INICIO: MÉTODOS AÑADIDOS PARA SCROLLBAR ---
+
+    def on_frame_configure(self, event=None):
+        """Actualiza el scrollregion del canvas."""
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def on_canvas_configure(self, event=None):
+        """Asegura que el frame interno llene el ancho del canvas."""
+        canvas_width = event.width
+        self.canvas.itemconfig(self.canvas_window, width=canvas_width)
+
+    def on_mousewheel(self, event):
+        """Maneja el scroll con la rueda del mouse (Windows/macOS)."""
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def on_mousewheel_linux(self, event):
+        """Maneja el scroll con la rueda del mouse (Linux)."""
+        if event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+
+    # --- FIN: MÉTODOS AÑADIDOS PARA SCROLLBAR ---
 
     def reset_defaults(self):
         defaults = {
