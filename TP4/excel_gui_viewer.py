@@ -1116,10 +1116,10 @@ class SimulationWindow(tk.Toplevel):
         y creamos un grupo "Cliente 5" para el header gráfico.
         """
         if cid in self.known_clients:
-            return
+            return  # El cliente ya existe, no hacemos nada
 
+        # 1. Actualizar la definición de columnas en memoria
         self.known_clients.append(cid)
-
         start_idx = len(self.columns)
 
         new_cols = [
@@ -1132,28 +1132,14 @@ class SimulationWindow(tk.Toplevel):
         self.columns.extend(new_cols)
         end_idx = len(self.columns) - 1
 
-        # Registramos este bloque como nuevo grupo visual "Cliente X"
+        # 2. Registramos este bloque como nuevo grupo visual "Cliente X"
         self.groups.append((f"Cliente {cid}", start_idx, end_idx))
 
-        # Agregamos estas nuevas columnas al Treeview
-        current_cols = list(self.tree["columns"])
-        for col in new_cols:
-            current_cols.append(col["id"])
-        self.tree["columns"] = current_cols
+        # 3. Re-aplicamos TODAS las columnas (viejas + nuevas) al Treeview
+        #    Esto leerá de self.columns y configurará todo de nuevo.
+        self._apply_columns()
 
-        # Encabezados y tamaño de las nuevas columnas
-        for col in new_cols:
-            self.tree.heading(col["id"], text=col["text"], anchor="center")
-            self.tree.column(
-                col["id"],
-                width=col["w"],
-                minwidth=40,
-                anchor="center",
-                stretch=False
-            )
-
-        # Redibujamos encabezado de grupos con el nuevo bloque
-        self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 40))
+        # 4. Redibujamos el header de grupos (que _apply_columns no hace)
         self._draw_group_headers()
 
     def on_next(self):
