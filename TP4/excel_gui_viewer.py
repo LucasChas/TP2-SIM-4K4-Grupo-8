@@ -805,6 +805,66 @@ class StatsWindow(tk.Toplevel):
 
 # ----------------- Ventana de Simulación (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
+    
+    def run_all_events(self):
+        """
+        Ejecuta automáticamente todos los eventos de la simulación hasta finalizar.
+        Genera todas las filas en el Treeview de una sola vez.
+        """
+        while True:
+            try:
+                if not self.engine.hay_mas():
+                    # Fin: integrar últimas estadísticas
+                    self.engine.finalizar_estadisticas()
+                    self.open_stats()
+                    self._refresh_stats_window(final=True)
+                    messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
+                    break
+
+                row, cli_snap = self.engine.siguiente_evento()
+
+                # Asegurar columnas de todos los clientes activos
+                for cid in sorted(cli_snap.keys()):
+                    self._ensure_client_columns(cid)
+
+                # Armar fila completa
+                values = []
+                for col_id in self.tree["columns"]:
+                    if col_id.startswith("c"):
+                        try:
+                            prefix, campo = col_id.split("_", 1)
+                        except ValueError:
+                            prefix, campo = col_id, ""
+                        cid_str = prefix[1:] if prefix.startswith("c") else prefix
+                        try:
+                            cid_int = int(cid_str)
+                        except ValueError:
+                            cid_int = None
+
+                        if cid_int is not None and cid_int in cli_snap:
+                            cli_info = cli_snap[cid_int]
+                            values.append(cli_info.get(campo, ""))
+                        else:
+                            values.append("")
+                    else:
+                        if col_id == "iteracion":
+                            values.append(str(self.engine.iteration))
+                        else:
+                            v = row.get(col_id, "")
+                            values.append("" if v == "" else str(v))
+
+                self.tree.insert("", "end", values=values)
+                self._draw_group_headers()
+                self._refresh_stats_window(final=False)
+
+            except StopIteration:
+                # Fin de simulación
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+                messagebox.showinfo("Fin de simulación", "Se alcanzó el límite de tiempo o iteraciones.")
+                break
+
+    
     def __init__(self, master, config_dict):
         super().__init__(master)
         self.title("Vector de Estado - Simulación (Streaming memoria optimizada)")
@@ -812,6 +872,7 @@ class SimulationWindow(tk.Toplevel):
         self.minsize(1200, 560)
 
         self.engine = SimulationEngine(config_dict)
+        self.modo_auto = bool(config_dict["simulacion"].get("modo_auto", False))
         self.stats_win = None
         self.known_clients = []  # clientes que ya generaron columnas
 
@@ -836,7 +897,14 @@ class SimulationWindow(tk.Toplevel):
         resumen.pack(side="left")
 
         ttk.Button(top, text="Estadísticas", command=self.open_stats).pack(side="right", padx=(6, 0))
-        ttk.Button(top, text="Siguiente evento", command=self.on_next).pack(side="right")
+        if not self.modo_auto:
+            # Solo en modo manual mostramos "Siguiente evento"
+            ttk.Button(top, text="Siguiente evento", command=self.on_next).pack(side="right")
+        else:
+            # En modo auto podés querer un botón para "Pausar" o "Ejecutar todo ahora".
+            # Si querés, dejalo así de simple y que corra solo:
+            pass
+
 
         # Definición de columnas base
         self.columns = []
@@ -891,7 +959,7 @@ class SimulationWindow(tk.Toplevel):
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
 
-        # Grupo ESTADISTICAS · CLIENTES
+        # Grupo ESTADISTICAS · CLIENTESa
         # ACUMULADOR TIEMPO PERMANENCIA -> acumulado histórico de (reloj actual - hora_llegada)
         # SOLO cuando el cliente pasa a DESTRUCCION
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
@@ -949,6 +1017,11 @@ class SimulationWindow(tk.Toplevel):
 
         # Inserto fila de INICIALIZACION
         self._insert_initialization_row()
+        # Ejecutar toda la simulación automáticamente si así se configuró
+        if self.modo_auto:
+            # Dejamos respirar a la UI y luego corremos todo
+            self.after(100, self.run_all_events)
+
 
     # --- Helpers UI ---
     def open_stats(self):
@@ -1301,6 +1374,14 @@ class App(tk.Tk):
             sim, "j_inicio", "j (minuto de inicio)", 0, 0, 10_000,
             "Minuto desde el cual se comienzan a mostrar las i iteraciones."
         )
+        # Checkbox: ejecutar automáticamente toda la simulación
+        self.auto_var = tk.BooleanVar(value=True)  # True = auto por defecto (cámbialo si querés)
+        ttk.Checkbutton(
+            sim,
+            text="Ejecutar automáticamente (sin 'Siguiente evento')",
+            variable=self.auto_var
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
 
         # --- 2) Llegadas ---
         lleg = ttk.LabelFrame(root, text="2) Llegadas")
@@ -1549,6 +1630,7 @@ class App(tk.Tk):
                     "i_iteraciones": i_mos,
                     "desde_minuto_j": j_ini
                 },
+                "modo_auto": bool(self.auto_var.get())
             },
             "llegadas": {
                 "tiempo_entre_llegadas_min": t_lleg
