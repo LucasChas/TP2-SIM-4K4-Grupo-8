@@ -888,7 +888,8 @@ class SimulationWindow(tk.Toplevel):
                 # Armar fila completa
                 values = []
                 for col_id in self.tree["columns"]:
-                    if col_id.startswith("c"):
+                    if self._is_client_column(col_id):
+                        # --- columnas dinámicas tipo c{id}_campo ---
                         try:
                             prefix, campo = col_id.split("_", 1)
                         except ValueError:
@@ -905,6 +906,7 @@ class SimulationWindow(tk.Toplevel):
                         else:
                             values.append("")
                     else:
+                        # --- columnas fijas normales (incluye cola) ---
                         if col_id == "iteracion":
                             values.append(str(self.engine.iteration))
                         else:
@@ -1194,6 +1196,30 @@ class SimulationWindow(tk.Toplevel):
 
         self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
 
+    def _is_client_column(self, col_id: str) -> bool:
+            """
+            Devuelve True solo si la columna es del tipo dinámico de cliente:
+            ejemplo: c5_estado, c12_hora_llegada, etc.
+
+            Regla:
+            - empieza con 'c'
+            - después de la 'c' viene un número (id de cliente)
+            - luego un '_' y el nombre del campo
+            """
+            if not col_id.startswith("c"):
+                return False
+
+            parts = col_id.split("_", 1)
+            if len(parts) != 2:
+                return False
+
+            prefix = parts[0]  # ej. 'c5' o 'c12'
+            if len(prefix) < 2:
+                return False
+
+            # lo que viene después de la 'c' tienen que ser dígitos
+            return prefix[1:].isdigit()
+
     def _insert_initialization_row(self):
         eng = self.engine
         eng._update_biblio_estado()
@@ -1231,7 +1257,8 @@ class SimulationWindow(tk.Toplevel):
 
         vals = []
         for col_id in self.tree["columns"]:
-            if col_id.startswith("c"):
+            if self._is_client_column(col_id):
+                # columnas dinámicas de "Cliente N"
                 vals.append("")
             elif col_id == "iteracion":
                 vals.append("0")
@@ -1309,8 +1336,8 @@ class SimulationWindow(tk.Toplevel):
         # Preparamos los valores para TODAS las columnas actuales
         values = []
         for col_id in self.tree["columns"]:
-            if col_id.startswith("c"):
-                # tipo c<ID>_<campo>
+            if self._is_client_column(col_id):
+                # --- columnas dinámicas tipo c{id}_campo ---
                 try:
                     prefix, campo = col_id.split("_", 1)
                 except ValueError:
@@ -1334,9 +1361,9 @@ class SimulationWindow(tk.Toplevel):
                     else:
                         values.append("")
                 else:
-                    # cliente ya destruido en una iteración anterior -> en blanco
                     values.append("")
             else:
+                # --- columnas fijas normales (incluye cola) ---
                 if col_id == "iteracion":
                     values.append(str(self.engine.iteration))
                 else:
