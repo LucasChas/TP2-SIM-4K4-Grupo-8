@@ -836,7 +836,7 @@ class SimulationWindow(tk.Toplevel):
         # Grupo LLEGADA_CLIENTE
         add_col("lleg_tiempo", "TIEMPO", 90)
         add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)
-        add_col("lleg_id", "ID Cliente", 110)
+    
 
         # Grupo TRANSACCION
         add_col("trx_rnd", "RND", 80)

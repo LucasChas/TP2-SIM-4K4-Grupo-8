@@ -241,7 +241,7 @@ class SimulationEngine:
             return False, "", "", "", ""
 
         trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
-        c.estado = f"SIENDO ATENDIDO({idx_bib + 1})"
+        c.estado = f"SA({idx_bib + 1})"
 
         rnd_srv, demora = self._demora_por_transaccion(c.accion_actual)
         b.estado = "OCUPADO"
@@ -337,7 +337,7 @@ class SimulationEngine:
 
         # Fines de lectura
         for cid, c in self.clientes.items():
-            if c.estado == "EC LEYENDO" and c.fin_lect_num is not None:
+            if c.estado == "LB" and c.fin_lect_num is not None:
                 cand.append((c.fin_lect_num, 3 + cid * 1e-6, "fin_lectura", {"cid": cid}))
 
         # Próxima llegada
@@ -363,20 +363,53 @@ class SimulationEngine:
 
     # ---------- snapshots / métricas para la UI ----------
     def build_client_snapshot(self):
-        """
-        Devuelve snapshot de todos los clientes que siguen "presentes"
-        (incluye los que acaban de pasar a DESTRUCCION en esta misma fila,
-         se limpian en la próxima iteración).
-        """
-        snap = {}
-        for cid, c in self.clientes.items():
-            snap[cid] = {
-                "estado": c.estado,
-                "hora_llegada": fmt(c.hora_llegada, 2),
-                "a_que_fue": c.accion_actual or c.a_que_fue_inicial,
-                "cuando_termina": c.cuando_termina_leer,
-            }
-        return snap
+            """
+            Snapshot para las columnas dinámicas Cliente N.
+
+            Reglas de visualización por estado:
+
+            - "DESTRUCCION":
+                Solo mostramos el estado.
+                Dejamos vacíos hora_llegada, a_que_fue y cuando_termina.
+                (El cliente ya salió del sistema.)
+
+            - "LB" (leyendo en biblioteca):
+                Mostramos estado, hora_llegada y cuando_termina.
+                PERO dejamos vacío "a_que_fue", porque en esta etapa
+                ya no nos importa el motivo original con el que vino.
+
+            - Otros estados ("EN COLA", "SA(1)", "SA(2)", etc.):
+                Mostramos todo normalmente.
+            """
+            snap = {}
+            for cid, c in self.clientes.items():
+                if c.estado == "DESTRUCCION":
+                    snap[cid] = {
+                        "estado": c.estado,
+                        "hora_llegada": "",
+                        "a_que_fue": "",
+                        "cuando_termina": "",
+                    }
+
+                elif c.estado == "LB":
+                    snap[cid] = {
+                        "estado": c.estado,
+                        "hora_llegada": fmt(c.hora_llegada, 2),
+                        "a_que_fue": "",  # <- pedido: no mostrar el "a qué fue" en LB
+                        "cuando_termina": c.cuando_termina_leer,
+                    }
+
+                else:
+                    snap[cid] = {
+                        "estado": c.estado,
+                        "hora_llegada": fmt(c.hora_llegada, 2),
+                        "a_que_fue": c.accion_actual or c.a_que_fue_inicial,
+                        "cuando_termina": c.cuando_termina_leer,
+                    }
+
+            return snap
+    
+
 
     def snapshot_estadisticas(self):
         """
@@ -484,7 +517,7 @@ class SimulationEngine:
             if (not self._hay_cola()) and (libre is not None):
                 # Pasa directo con bibliotecario libre
                 trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
-                c.estado = f"SIENDO ATENDIDO({libre + 1})"
+                c.estado = f"SA({libre + 1})"
 
                 rnd_srv, demora = self._demora_por_transaccion(c.accion_actual)
                 b = self.bib[libre]
@@ -555,125 +588,150 @@ class SimulationEngine:
         return row, cli_snap
 
     def _evento_fin_atencion(self, i):
-        """
-        Evento: FIN_ATENCION_i
-        """
-        idx = i - 1
-        b = self.bib[idx]
-        t = b.hora_num
+            """
+            Evento: FIN_ATENCION_i
+            """
+            idx = i - 1
+            b = self.bib[idx]
+            t = b.hora_num
 
-        # Integramos ocio hasta este tiempo
-        self._integrar_estadisticas_hasta(t)
+            # Integramos ocio hasta este tiempo
+            self._integrar_estadisticas_hasta(t)
 
-        # Avanzamos
-        self.iteration += 1
-        self.clock = t
+            # Avanzamos
+            self.iteration += 1
+            self.clock = t
 
-        # Permanencia de los clientes que salen en ESTE evento
-        event_perm_sum = 0.0
+            # Permanencia de los clientes que salen en ESTE evento
+            event_perm_sum = 0.0
 
-        # Reset columnas de bibliotecarios para ESTA fila
-        self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
-        self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
+            # Reset columnas de bibliotecarios para ESTA fila
+            self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
+            self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
 
-        cid = b.cliente_id
-        c = self.clientes[cid]
+            cid = b.cliente_id
+            c = self.clientes[cid]
 
-        lee_rnd = ""
-        lee_lugar = ""
-        lee_tiempo = ""
-        lee_fin = ""
+            # Campos que van al bloque "¿Dónde Lee?" de la fila
+            lee_rnd = ""
+            lee_lugar = ""
+            lee_tiempo = ""
+            lee_fin = ""
 
-        # Después de la atención, depende de la acción
-        if c.accion_actual == "Pedir":
-            # Decide si se lo lleva o se queda leyendo
-            r = random.random()
-            lee_rnd = fmt(r, 4)
-            if r < self.p_retira:
-                # Se va con el libro -> destrucción inmediata
+            # Después de la atención, depende de la acción
+            if c.accion_actual == "Pedir":
+                # Decide si se lo lleva o se queda leyendo
+                r = random.random()
+                lee_rnd = fmt(r, 4)
+
+                if r < self.p_retira:
+                    # CASO 1: Se lo lleva para leer en su casa
+                    # → pasa directo a destrucción
+                    c.estado = "DESTRUCCION"
+                    c.fin_lect_num = None
+                    c.cuando_termina_leer = ""
+
+                    # NUEVO: marcar explícitamente dónde lee
+                    # aunque ya se vaya del sistema
+                    lee_lugar = "Casa"
+                    lee_tiempo = ""
+                    lee_fin = ""
+
+                    # estadística de permanencia
+                    tiempo_perm = (self.clock - c.hora_llegada)
+                    event_perm_sum += tiempo_perm
+                    self.sum_tiempo_en_sistema += tiempo_perm
+                    self.cli_completados += 1
+                    self._to_clear_after_emit.add(c.id)
+
+                else:
+                    # CASO 2: Se queda a leer en biblioteca
+                    c.estado = "LB"
+                    fin_lec = self.clock + self.t_lect_biblio
+                    c.fin_lect_num = fin_lec
+                    c.cuando_termina_leer = fmt(fin_lec, 2)
+
+                    lee_lugar = "Biblioteca"
+                    lee_tiempo = fmt(self.t_lect_biblio, 2)
+                    lee_fin = c.cuando_termina_leer
+
+                    # ahora ocupa una mesa en sala de lectura
+                    self.biblio_personas_cnt += 1
+
+            else:
+                # Devolver / Consultar ⇒ se va del sistema
                 c.estado = "DESTRUCCION"
                 c.fin_lect_num = None
                 c.cuando_termina_leer = ""
+
+                # En este caso NO vino a leer nada, así que no ponemos "Casa"
+                # ni "Biblioteca", lo dejamos vacío.
+                # (Mantiene la semántica: solo "Casa" aplica a "me llevo el libro a casa")
                 tiempo_perm = (self.clock - c.hora_llegada)
                 event_perm_sum += tiempo_perm
                 self.sum_tiempo_en_sistema += tiempo_perm
                 self.cli_completados += 1
                 self._to_clear_after_emit.add(c.id)
-            else:
-                # Se queda a leer en biblioteca
-                c.estado = "EC LEYENDO"
-                fin_lec = self.clock + self.t_lect_biblio
-                c.fin_lect_num = fin_lec
-                c.cuando_termina_leer = fmt(fin_lec, 2)
-                lee_lugar = "Biblioteca"
-                lee_tiempo = fmt(self.t_lect_biblio, 2)
-                lee_fin = c.cuando_termina_leer
-                self.biblio_personas_cnt += 1
-        else:
-            # Devolver / Consultar ⇒ se va del sistema
-            c.estado = "DESTRUCCION"
-            c.fin_lect_num = None
-            c.cuando_termina_leer = ""
-            tiempo_perm = (self.clock - c.hora_llegada)
-            event_perm_sum += tiempo_perm
-            self.sum_tiempo_en_sistema += tiempo_perm
-            self.cli_completados += 1
-            self._to_clear_after_emit.add(c.id)
 
-        # Bibliotecario queda libre
-        b.estado = "LIBRE"
-        b.rnd = ""
-        b.demora = ""
-        b.hora = ""
-        b.hora_num = None
-        b.cliente_id = None
+            # Bibliotecario queda libre
+            b.estado = "LIBRE"
+            b.rnd = ""
+            b.demora = ""
+            b.hora = ""
+            b.hora_num = None
+            b.cliente_id = None
 
-        # Intenta agarrar siguiente en cola
-        asigno, rnd_b, demora_b, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
-        if asigno:
-            self.last_b[i]["rnd"] = rnd_b
-            self.last_b[i]["demora"] = demora_b
-            self.last_b[i]["trx_rnd"] = trx_rnd
-            self.last_b[i]["trx_tipo"] = trx_tipo
+            # Intenta agarrar siguiente en cola
+            asigno, rnd_b, demora_b, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
+            if asigno:
+                self.last_b[i]["rnd"] = rnd_b
+                self.last_b[i]["demora"] = demora_b
+                self.last_b[i]["trx_rnd"] = trx_rnd
+                self.last_b[i]["trx_tipo"] = trx_tipo
 
-        # Actualizamos estado biblioteca
-        self._update_biblio_estado()
+            # Actualizamos estado biblioteca
+            self._update_biblio_estado()
 
-        # >>>>> acumulador histórico de permanencia de clientes <<<<<
-        self.cli_perm_acum_total += event_perm_sum
+            # >>>>> acumulador histórico de permanencia de clientes <<<<<
+            self.cli_perm_acum_total += event_perm_sum
 
-        row = {
-            "evento": f"FIN_ATENCION_{i}({cid})",
-            "reloj": fmt(self.clock, 2),
-            "lleg_tiempo": "",
-            "lleg_minuto": fmt(self.next_arrival, 2),
-            "lleg_id": "",
-            "trx_rnd": self.last_b[i]["trx_rnd"],
-            "trx_tipo": self.last_b[i]["trx_tipo"],
-            "lee_rnd": lee_rnd,
-            "lee_lugar": lee_lugar,
-            "lee_tiempo": lee_tiempo,
-            "lee_fin": lee_fin,
-            "b1_estado": self.bib[0].estado,
-            "b1_rnd": self.last_b[1]["rnd"],
-            "b1_demora": self.last_b[1]["demora"],
-            "b1_hora": self.bib[0].hora,
-            "b2_estado": self.bib[1].estado,
-            "b2_rnd": self.last_b[2]["rnd"],
-            "b2_demora": self.last_b[2]["demora"],
-            "b2_hora": self.bib[1].hora,
-            "cola": len(self.cola),
-            "biblio_estado": self.biblio_estado,
-            "biblio_personas": self._total_people_present_for_display(),
-            # estadísticas pedidas:
-            "est_b1_libre": fmt(self.last_iter_b1_libre),
-            "est_b2_libre": fmt(self.last_iter_b2_libre),
-            "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
-            "est_cli_perm_acum": fmt(self.cli_perm_acum_total),
-        }
+            row = {
+                "evento": f"FIN_ATENCION_{i}({cid})",
+                "reloj": fmt(self.clock, 2),
+                "lleg_tiempo": "",
+                "lleg_minuto": fmt(self.next_arrival, 2),
+                "lleg_id": "",
+                "trx_rnd": self.last_b[i]["trx_rnd"],
+                "trx_tipo": self.last_b[i]["trx_tipo"],
 
-        cli_snap = self.build_client_snapshot()
-        return row, cli_snap
+                # ¿Dónde Lee?
+                "lee_rnd": lee_rnd,
+                "lee_lugar": lee_lugar,     # <- ahora puede ser "Biblioteca" o "Casa"
+                "lee_tiempo": lee_tiempo,   # si "Casa", queda ""
+                "lee_fin": lee_fin,         # si "Casa", queda ""
+
+                "b1_estado": self.bib[0].estado,
+                "b1_rnd": self.last_b[1]["rnd"],
+                "b1_demora": self.last_b[1]["demora"],
+                "b1_hora": self.bib[0].hora,
+                "b2_estado": self.bib[1].estado,
+                "b2_rnd": self.last_b[2]["rnd"],
+                "b2_demora": self.last_b[2]["demora"],
+                "b2_hora": self.bib[1].hora,
+                "cola": len(self.cola),
+                "biblio_estado": self.biblio_estado,
+                "biblio_personas": self._total_people_present_for_display(),
+
+                # estadísticas pedidas:
+                "est_b1_libre": fmt(self.last_iter_b1_libre),
+                "est_b2_libre": fmt(self.last_iter_b2_libre),
+                "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
+                "est_cli_perm_acum": fmt(self.cli_perm_acum_total),
+            }
+
+            cli_snap = self.build_client_snapshot()
+            return row, cli_snap
+
 
     def _evento_fin_lectura(self, cid):
         """
@@ -707,7 +765,7 @@ class SimulationEngine:
 
         libre = self._primer_bib_libre()
         if libre is not None:
-            c.estado = f"SIENDO ATENDIDO({libre + 1})"
+            c.estado = f"SA({libre + 1})"
             rnd_srv, demora = self._demora_por_transaccion(c.accion_actual)
             b = self.bib[libre]
             b.estado = "OCUPADO"
@@ -921,7 +979,7 @@ class SimulationWindow(tk.Toplevel):
         # Grupo LLEGADA_CLIENTE
         add_col("lleg_tiempo", "TIEMPO", 90)
         add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)
-        add_col("lleg_id", "ID Cliente", 110)
+
 
         # Grupo TRANSACCION
         add_col("trx_rnd", "RND", 80)
