@@ -4,8 +4,11 @@ import json
 import random
 import math
 from collections import deque
+import sqlite3
+import tempfile
+import os
 
-APP_TITLE = "Parámetros de Simulación - Biblioteca (Streaming de filas + columnas por Cliente)"
+APP_TITLE = "Parámetros de Simulación - Biblioteca (Tabla virtualizada / RAM estable)"
 GROUP_BG = "#e8efff"
 GROUP_BORDER = "#a8b3d7"
 MAX_CAPACITY = 20  # Máximo total de personas dentro (2 bibliotecarios + hasta 18 clientes)
@@ -39,48 +42,47 @@ def fmt(x, nd=2):
 class Cliente:
     def __init__(self, cid, hora_llegada):
         self.id = cid
-        # estado puede ser:
-        # "EN COLA", "SIENDO ATENDIDO(1)", "SIENDO ATENDIDO(2)", "EC LEYENDO", "DESTRUCCION"
+        # estados posibles: "EN COLA", "SIENDO ATENDIDO(1)", "SIENDO ATENDIDO(2)",
+        # "EC LEYENDO", "DESTRUCCION"
         self.estado = "EN COLA"
 
         # Tiempos clave
-        self.hora_llegada = hora_llegada  # float, necesitamos esto para permanencia total
-        self.hora_entrada_cola = hora_llegada  # cuando entra o reingresa a cola
+        self.hora_llegada = hora_llegada      # float (para permanencia total en el sistema)
+        self.hora_entrada_cola = hora_llegada # cuando entra/reingresa a cola
 
         # Motivo / acción
-        self.a_que_fue_inicial = ""   # Pedir / Devolver / Consultar (primera vez que se define)
-        self.accion_actual = ""       # acción actual que se está atendiendo
+        self.a_que_fue_inicial = ""   # primera acción declarada ("Pedir", "Devolver", "Consultar")
+        self.accion_actual = ""       # acción actual
 
         # Lectura en biblioteca
-        self.fin_lect_num = None      # float con el fin de lectura (si está leyendo en biblioteca)
-        self.cuando_termina_leer = "" # string para mostrar "hh.hh" o mensaje
+        self.fin_lect_num = None      # float fin de lectura
+        self.cuando_termina_leer = "" # string amigable del fin de lectura
 
 
 class Bibliotecario:
     def __init__(self):
-        self.estado = "LIBRE"     # "LIBRE" / "OCUPADO"
-        self.rnd = ""             # RND del servicio asignado en ESTE evento
-        self.demora = ""          # Demora asignada en ESTE evento
-        self.hora = ""            # Fin de servicio estimado (string)
-        self.hora_num = None      # Fin de servicio estimado (float)
-        self.cliente_id = None    # ID del cliente que atiende ahora
+        self.estado = "LIBRE"   # "LIBRE" / "OCUPADO"
+        self.rnd = ""           # RND del servicio actual
+        self.demora = ""        # demora servicio actual
+        self.hora = ""          # fin de servicio estimado (string)
+        self.hora_num = None    # fin de servicio estimado (float)
+        self.cliente_id = None  # ID del cliente al que atiende
 
 
 # ----------------- Motor de simulación -----------------
 class SimulationEngine:
     """
-    Motor de eventos discretos. Cada avance:
+    Motor de eventos discretos. Cada avance puede ser:
       - LLEGADA_CLIENTE
       - FIN_ATENCION_i
       - FIN_LECTURA
 
-    Lógica clave pedida:
-    - El tiempo libre de cada bibliotecario en la fila actual es SOLO el intervalo entre el evento anterior y éste
-      (si estuvo libre todo ese intervalo, vale ese dt; si no, vale 0).
-    - El acumulador de tiempo ocioso de bibliotecarios es ACUMULADO histórico:
-      acumulado_prev + (libre_b1_iter + libre_b2_iter).
-    - El acumulador de permanencia de clientes se incrementa SOLO cuando el cliente entra en DESTRUCCION
-      (sale del sistema). El valor que se suma es reloj_actual - hora_llegada. Se muestra acumulado histórico.
+    Métricas pedidas:
+    - tiempo libre bibliotecario en ESTA iteración = dt entre evento anterior y este,
+      sólo si el bibliotecario estuvo LIBRE todo ese dt;
+    - acumulador de ocio total de bibliotecarios = suma histórica de sus tiempos libres;
+    - acumulador de permanencia de clientes = suma histórica de (reloj_salida - hora_llegada)
+      sólo cuando el cliente sale del sistema (DESTRUCCION).
     """
 
     def __init__(self, cfg):
@@ -110,54 +112,45 @@ class SimulationEngine:
         self.iteration = 0
         self.next_client_id = 1
 
-        # Estructuras de estado del sistema
+        # Estado de clientes
         self.cola = deque()            # cola FIFO de IDs de cliente
-        self.clientes = {}             # id -> Cliente (solo vivos / activos / recién destruidos)
-        self._to_clear_after_emit = set()  # IDs que se borran ANTES del siguiente evento
+        self.clientes = {}             # id -> Cliente (activos / recién destruidos)
+        self._to_clear_after_emit = set()  # IDs para borrar antes del siguiente evento
 
         # Bibliotecarios
         self.bib = [Bibliotecario(), Bibliotecario()]
 
-        # Gente leyendo físicamente en sala
+        # Personas leyendo físicamente en sala
         self.biblio_personas_cnt = 0
         self.biblio_estado = ""
         self._update_biblio_estado()
 
-        # Valores que se muestran SOLO en la fila actual (por bibliotecario)
+        # Valores mostrados sólo en la fila actual (por bibliotecario)
         self.last_b = {
             1: {"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""},
             2: {"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""},
         }
 
-        # Métricas acumuladas GLOBALES históricas
-        # - est_b1_libre_acum / est_b2_libre_acum:
-        #   tiempo total que cada bibliotecario estuvo libre sumando todas las iteraciones.
-        # - est_bib_ocioso_acum:
-        #   suma acumulada total entre ambos bibliotecarios. (lo que vos querés en la columna ACUMULADOR...)
+        # Métricas acumuladas globales
         self.est_b1_libre_acum = 0.0
         self.est_b2_libre_acum = 0.0
-        self.est_bib_ocioso_acum = 0.0
+        self.est_bib_ocioso_acum = 0.0  # suma histórica total entre ambos
 
-        # Valores por-iteración (para mostrar columnas TIEMPO LIBRE B1 / B2 en esa fila)
-        self.last_iter_b1_libre = 0.0
-        self.last_iter_b2_libre = 0.0
+        self.last_iter_b1_libre = 0.0   # dt libre en ESTA iteración (b1)
+        self.last_iter_b2_libre = 0.0   # dt libre en ESTA iteración (b2)
 
-        # Acumulador histórico de permanencia de clientes destruidos
-        # (ACUMULADOR TIEMPO PERMANENCIA en la tabla)
+        # Permanencia de clientes destruidos
         self.cli_perm_acum_total = 0.0
-
-        # También llevamos métrica para promedio final:
-        # sum_tiempo_en_sistema y cli_completados, sólo cuando un cliente se destruye
         self.cli_completados = 0
         self.sum_tiempo_en_sistema = 0.0
 
         self._finalizado = False
 
-    # ----------------- helpers internos -----------------
+    # ---------- helpers internos ----------
     def _clear_destroyed_clients(self):
         """
-        Borra definitivamente (de self.clientes) los que ya salieron en el evento anterior.
-        Así en la fila siguiente dejan de aparecer en las columnas Cliente N_*.
+        Borra definitivamente los clientes marcados como destruidos en la iteración anterior,
+        para que dejen de mostrarse en las columnas Cliente N en las filas siguientes.
         """
         if not self._to_clear_after_emit:
             return
@@ -178,10 +171,8 @@ class SimulationEngine:
 
     def _elige_transaccion(self, rnd_val):
         """
-        A partir de un rnd en [0,1):
-        - si cae en pedir -> 'Pedir'
-        - si cae en devolver -> 'Devolver'
-        - si cae en consultar -> 'Consultar'
+        rnd_val en [0,1)
+        decide si es Pedir / Devolver / Consultar
         """
         if rnd_val < self.p_pedir:
             return "Pedir"
@@ -192,12 +183,10 @@ class SimulationEngine:
 
     def _sortear_transaccion_si_falta(self, cliente: Cliente):
         """
-        Si el cliente todavía no tiene acción_actual,
-        sorteamos su primera transacción y la guardamos.
-        Devuelve (rnd_trx, tipo_trx) como strings para registrar en la fila.
+        Si el cliente todavía no tiene acción_actual, la sorteamos ahora.
+        Devuelve (rnd_trx, tipo_trx) para la fila de esta iteración.
         """
         if cliente.accion_actual:
-            # Ya traía una acción en curso (ej., volvió de leer y ahora viene a "Devolver")
             return "", cliente.accion_actual
 
         rnd_trx_val = random.random()
@@ -208,10 +197,10 @@ class SimulationEngine:
 
     def _demora_por_transaccion(self, tipo):
         """
-        Devuelve (rnd_servicio, demora) según la acción que atiende el bibliotecario.
-        - Consultar: Uniforme(A,B)
-        - Devolver: Uniforme(1.5, 2.5) (ejemplo)
-        - Pedir: Exponencial(media=6)
+        Según el tipo de transacción, genera rnd_srv y demora:
+        - Consultar -> Uniforme(A,B)
+        - Devolver -> Uniforme(1.5,2.5)
+        - Pedir     -> Exponencial(media=6)
         """
         r = random.random()
         if tipo == "Consultar":
@@ -219,16 +208,15 @@ class SimulationEngine:
         elif tipo == "Devolver":
             demora = 1.5 + r * (2.5 - 1.5)
         else:  # "Pedir"
-            demora = -6.0 * math.log(1.0 - r)  # Exponencial media=6
+            demora = -6.0 * math.log(1.0 - r)
         return r, demora
 
     def _tomar_de_cola(self, idx_bib):
         """
-        Si hay alguien en cola y el bibliotecario idx_bib está libre,
+        Si hay cliente en cola y el bibliotecario idx_bib está libre,
         lo atiende inmediatamente.
 
-        Devuelve tuple:
-          (hubo_asignacion, rnd_serv, demora, trx_rnd, trx_tipo)
+        Devuelve (hubo_asignacion, rnd_serv, demora, trx_rnd, trx_tipo)
         para mostrar en la fila actual.
         """
         if not self.cola:
@@ -255,10 +243,10 @@ class SimulationEngine:
 
     def _current_clients_occupying_spot(self):
         """
-        Cantidad de clientes ocupando lugar físico en biblioteca:
-        - cola
+        Cuántos clientes están físicamente presentes:
+        - en cola
         - siendo atendidos
-        - leyendo en sala
+        - leyendo en la biblioteca
         """
         en_servicio = (1 if self.bib[0].estado == "OCUPADO" else 0) + \
                       (1 if self.bib[1].estado == "OCUPADO" else 0)
@@ -266,14 +254,14 @@ class SimulationEngine:
 
     def _total_people_present_for_display(self):
         """
-        Total de personas físicas adentro:
-        2 bibliotecarios + clientes en cola/atención/leyendo.
+        Total físico dentro de la biblioteca:
+        2 bibliotecarios + los clientes presentes (cola / atención / leyendo).
         """
         return 2 + self._current_clients_occupying_spot()
 
     def _update_biblio_estado(self):
         """
-        Biblioteca Abierta o Cerrada según capacidad.
+        Biblioteca "Abierta" o "Cerrada" según capacidad.
         """
         if self._total_people_present_for_display() >= MAX_CAPACITY:
             self.biblio_estado = "Cerrada"
@@ -282,49 +270,41 @@ class SimulationEngine:
 
     def _integrar_estadisticas_hasta(self, new_time: float):
         """
-        Integra las métricas desde self.last_clock hasta new_time.
-
-        - Calcula dt.
-        - Si un bibliotecario estuvo LIBRE TODO ese dt, ese dt se considera
-          "tiempo libre de ESTA iteración" para ese bib.
-          Caso contrario, 0 para ese bib en ESTA iteración.
-        - Suma esos dt al acumulador histórico.
-        - Actualiza el acumulador total de ocio de ambos.
+        Integra las estadísticas de ocio de bibliotecarios
+        desde self.last_clock hasta new_time.
         """
         dt = new_time - self.last_clock
 
-        # Reset valores por-iteración (para esta fila)
+        # reset por-iteración
         self.last_iter_b1_libre = 0.0
         self.last_iter_b2_libre = 0.0
 
         if dt <= 0:
             self.last_clock = new_time
-            # no pasa tiempo → en esta iteración ambos libres = 0 y no sumamos
             return
 
-        # Bibliotecario 1
+        # bibliotecario 1
         if self.bib[0].estado == "LIBRE":
             self.last_iter_b1_libre = dt
-            self.est_b1_libre_acum += dt  # histórico global
+            self.est_b1_libre_acum += dt
 
-        # Bibliotecario 2
+        # bibliotecario 2
         if self.bib[1].estado == "LIBRE":
             self.last_iter_b2_libre = dt
-            self.est_b2_libre_acum += dt  # histórico global
+            self.est_b2_libre_acum += dt
 
-        # Actualizamos acumulador histórico total de ocio (B1+B2)
+        # acumulador histórico total de ocio
         self.est_bib_ocioso_acum = self.est_b1_libre_acum + self.est_b2_libre_acum
 
-        # Avanzamos marcador temporal
         self.last_clock = new_time
 
     def _proximo_evento(self):
         """
         Devuelve el próximo evento como tupla (t, prioridad, tipo, data).
-        Prioridad para desempatar:
+        prioridad:
           1 FIN_ATENCION_1
           2 FIN_ATENCION_2
-          3 FIN_LECTURA (offset por ID)
+          3 FIN_LECTURA (desempate leve con cid)
           4 LLEGADA_CLIENTE
         """
         cand = []
@@ -337,7 +317,7 @@ class SimulationEngine:
 
         # Fines de lectura
         for cid, c in self.clientes.items():
-            if c.estado == "LB" and c.fin_lect_num is not None:
+            if c.estado == "EC LEYENDO" and c.fin_lect_num is not None:
                 cand.append((c.fin_lect_num, 3 + cid * 1e-6, "fin_lectura", {"cid": cid}))
 
         # Próxima llegada
@@ -351,7 +331,7 @@ class SimulationEngine:
 
     def hay_mas(self):
         """
-        ¿Quedan eventos dentro de límites?
+        ¿Queda al menos un evento para disparar dentro de límites?
         """
         self._clear_destroyed_clients()
 
@@ -361,59 +341,26 @@ class SimulationEngine:
         t, *_ = ne
         return (self.iteration < self.iter_limit) and (t <= self.time_limit)
 
-    # ---------- snapshots / métricas para la UI ----------
+    # ---------- snapshots para la UI ----------
     def build_client_snapshot(self):
-            """
-            Snapshot para las columnas dinámicas Cliente N.
-
-            Reglas de visualización por estado:
-
-            - "DESTRUCCION":
-                Solo mostramos el estado.
-                Dejamos vacíos hora_llegada, a_que_fue y cuando_termina.
-                (El cliente ya salió del sistema.)
-
-            - "LB" (leyendo en biblioteca):
-                Mostramos estado, hora_llegada y cuando_termina.
-                PERO dejamos vacío "a_que_fue", porque en esta etapa
-                ya no nos importa el motivo original con el que vino.
-
-            - Otros estados ("EN COLA", "SA(1)", "SA(2)", etc.):
-                Mostramos todo normalmente.
-            """
-            snap = {}
-            for cid, c in self.clientes.items():
-                if c.estado == "DESTRUCCION":
-                    snap[cid] = {
-                        "estado": c.estado,
-                        "hora_llegada": "",
-                        "a_que_fue": "",
-                        "cuando_termina": "",
-                    }
-
-                elif c.estado == "LB":
-                    snap[cid] = {
-                        "estado": c.estado,
-                        "hora_llegada": fmt(c.hora_llegada, 2),
-                        "a_que_fue": "",  # <- pedido: no mostrar el "a qué fue" en LB
-                        "cuando_termina": c.cuando_termina_leer,
-                    }
-
-                else:
-                    snap[cid] = {
-                        "estado": c.estado,
-                        "hora_llegada": fmt(c.hora_llegada, 2),
-                        "a_que_fue": c.accion_actual or c.a_que_fue_inicial,
-                        "cuando_termina": c.cuando_termina_leer,
-                    }
-
-            return snap
-    
-
+        """
+        Snapshot para las columnas dinámicas Cliente N.
+        Incluye clientes “DESTRUCCION” en ESTA iteración,
+        se limpian recién en la siguiente iteración.
+        """
+        snap = {}
+        for cid, c in self.clientes.items():
+            snap[cid] = {
+                "estado": c.estado,
+                "hora_llegada": fmt(c.hora_llegada, 2),
+                "a_que_fue": c.accion_actual or c.a_que_fue_inicial,
+                "cuando_termina": c.cuando_termina_leer,
+            }
+        return snap
 
     def snapshot_estadisticas(self):
         """
-        Datos para la ventanita de Estadísticas (promedios globales).
+        Datos globales para ventana de estadísticas (promedios, etc.)
         """
         prom_permanencia = (
             self.sum_tiempo_en_sistema / self.cli_completados
@@ -430,7 +377,7 @@ class SimulationEngine:
 
     def finalizar_estadisticas(self):
         """
-        Integra hasta time_limit si quedaba un tramo final.
+        Integra hasta time_limit si faltaba un último tramo.
         """
         if not self._finalizado and self.last_clock < self.time_limit:
             self._integrar_estadisticas_hasta(self.time_limit)
@@ -441,8 +388,8 @@ class SimulationEngine:
     def siguiente_evento(self):
         """
         Avanza 1 evento y devuelve:
-         - row_dict (para columnas base de la fila nueva)
-         - cli_snap (para columnas Cliente N)
+         - row_dict con datos base (evento, reloj, etc.)
+         - cli_snap para columnas Cliente N
         """
         self._clear_destroyed_clients()
 
@@ -470,21 +417,21 @@ class SimulationEngine:
         """
         t = self.next_arrival
 
-        # Integramos estadística de ocio desde last_clock hasta t
+        # Integramos ocio hasta este tiempo
         self._integrar_estadisticas_hasta(t)
 
         # Avanzamos
         self.iteration += 1
         self.clock = t
 
-        # Acumulador parcial de permanencias SOLO de los que salen en ESTE evento
+        # Permanencia sumada en ESTA iteración por clientes que salen YA
         event_perm_sum = 0.0
 
-        # Limpiamos registros de bibliotecarios que mostramos solo en ESTA fila
+        # reset columnas por-iteración de bibliotecarios
         self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
         self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
 
-        # Creamos nuevo cliente
+        # Llega nuevo cliente
         cid = self.next_client_id
         self.next_client_id += 1
         c = Cliente(cid, hora_llegada=self.clock)
@@ -492,28 +439,24 @@ class SimulationEngine:
         trx_rnd = ""
         trx_tipo = ""
 
-        # Chequeo de capacidad física
+        # Chequeo de capacidad
         if self._current_clients_occupying_spot() >= (MAX_CAPACITY - 2):
-            # No entra → destruido inmediatamente
+            # No entra → destruido Forzado
             c.estado = "DESTRUCCION"
             c.fin_lect_num = None
             c.cuando_termina_leer = "CLIENTE DESTRUIDO (CAPACIDAD MAXIMA)"
             self.clientes[cid] = c
 
-            # Tiempo de permanencia = reloj actual - hora_llegada
             tiempo_perm = (self.clock - c.hora_llegada)
             event_perm_sum += tiempo_perm
-
-            # Para estadísticas globales finales
             self.sum_tiempo_en_sistema += tiempo_perm
             self.cli_completados += 1
 
-            # Se eliminará de memoria en la próxima iteración
+            # Se lo limpia en el próximo evento
             self._to_clear_after_emit.add(c.id)
         else:
             # Puede entrar
             libre = self._primer_bib_libre()
-
             if (not self._hay_cola()) and (libre is not None):
                 # Pasa directo con bibliotecario libre
                 trx_rnd, trx_tipo = self._sortear_transaccion_si_falta(c)
@@ -528,7 +471,7 @@ class SimulationEngine:
                 b.hora = fmt(b.hora_num)
                 b.cliente_id = c.id
 
-                # Para mostrar SOLO en esta fila
+                # Guardamos para mostrar esta iteración
                 self.last_b[libre + 1]["rnd"] = b.rnd
                 self.last_b[libre + 1]["demora"] = b.demora
                 self.last_b[libre + 1]["trx_rnd"] = trx_rnd
@@ -541,14 +484,13 @@ class SimulationEngine:
 
             self.clientes[cid] = c
 
-        # Programo próxima llegada
+        # Programar próxima llegada
         self.next_arrival = self.clock + self.t_inter
 
-        # Actualizo estado de biblioteca
+        # Actualizar estado biblioteca
         self._update_biblio_estado()
 
-        # >>>>> acumulador histórico de permanencia de clientes <<<<<
-        # Sumo al acumulador global SOLO lo que salió en este evento
+        # Acumular permanencia global
         self.cli_perm_acum_total += event_perm_sum
 
         row = {
@@ -574,13 +516,9 @@ class SimulationEngine:
             "cola": len(self.cola),
             "biblio_estado": self.biblio_estado,
             "biblio_personas": self._total_people_present_for_display(),
-            # --- estadísticas solicitadas en la tabla ---
-            # Libre por iteración (dt de ESTA iteración, o 0)
             "est_b1_libre": fmt(self.last_iter_b1_libre),
             "est_b2_libre": fmt(self.last_iter_b2_libre),
-            # Acumulador histórico total de ocio (B1+B2)
             "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
-            # Acumulador histórico de permanencia clientes destruidos
             "est_cli_perm_acum": fmt(self.cli_perm_acum_total),
         }
 
@@ -588,179 +526,141 @@ class SimulationEngine:
         return row, cli_snap
 
     def _evento_fin_atencion(self, i):
-            """
-            Evento: FIN_ATENCION_i
-            """
-            idx = i - 1
-            b = self.bib[idx]
-            t = b.hora_num
+        """
+        FIN_ATENCION_i
+        """
+        idx = i - 1
+        b = self.bib[idx]
+        t = b.hora_num
 
-            # Integramos ocio hasta este tiempo
-            self._integrar_estadisticas_hasta(t)
+        self._integrar_estadisticas_hasta(t)
 
-            # Avanzamos
-            self.iteration += 1
-            self.clock = t
+        self.iteration += 1
+        self.clock = t
 
-            # Permanencia de los clientes que salen en ESTE evento
-            event_perm_sum = 0.0
+        event_perm_sum = 0.0
 
-            # Reset columnas de bibliotecarios para ESTA fila
-            self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
-            self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
+        # limpiar info por-iteración
+        self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
+        self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
 
-            cid = b.cliente_id
-            c = self.clientes[cid]
+        cid = b.cliente_id
+        c = self.clientes[cid]
 
-            # Campos que van al bloque "¿Dónde Lee?" de la fila
-            lee_rnd = ""
-            lee_lugar = ""
-            lee_tiempo = ""
-            lee_fin = ""
+        lee_rnd = ""
+        lee_lugar = ""
+        lee_tiempo = ""
+        lee_fin = ""
 
-            # Después de la atención, depende de la acción
-            if c.accion_actual == "Pedir":
-                # Decide si se lo lleva o se queda leyendo
-                r = random.random()
-                lee_rnd = fmt(r, 4)
-
-                if r < self.p_retira:
-                    # CASO 1: Se lo lleva para leer en su casa
-                    # → pasa directo a destrucción
-                    c.estado = "DESTRUCCION"
-                    c.fin_lect_num = None
-                    c.cuando_termina_leer = ""
-
-                    # NUEVO: marcar explícitamente dónde lee
-                    # aunque ya se vaya del sistema
-                    lee_lugar = "Casa"
-                    lee_tiempo = ""
-                    lee_fin = ""
-
-                    # estadística de permanencia
-                    tiempo_perm = (self.clock - c.hora_llegada)
-                    event_perm_sum += tiempo_perm
-                    self.sum_tiempo_en_sistema += tiempo_perm
-                    self.cli_completados += 1
-                    self._to_clear_after_emit.add(c.id)
-
-                else:
-                    # CASO 2: Se queda a leer en biblioteca
-                    c.estado = "LB"
-                    fin_lec = self.clock + self.t_lect_biblio
-                    c.fin_lect_num = fin_lec
-                    c.cuando_termina_leer = fmt(fin_lec, 2)
-
-                    lee_lugar = "Biblioteca"
-                    lee_tiempo = fmt(self.t_lect_biblio, 2)
-                    lee_fin = c.cuando_termina_leer
-
-                    # ahora ocupa una mesa en sala de lectura
-                    self.biblio_personas_cnt += 1
-
-            else:
-                # Devolver / Consultar ⇒ se va del sistema
+        if c.accion_actual == "Pedir":
+            # decide lectura en casa vs en biblioteca
+            r = random.random()
+            lee_rnd = fmt(r, 4)
+            if r < self.p_retira:
+                # se va con el libro -> destrucción inmediata
                 c.estado = "DESTRUCCION"
                 c.fin_lect_num = None
                 c.cuando_termina_leer = ""
-
-                # En este caso NO vino a leer nada, así que no ponemos "Casa"
-                # ni "Biblioteca", lo dejamos vacío.
-                # (Mantiene la semántica: solo "Casa" aplica a "me llevo el libro a casa")
                 tiempo_perm = (self.clock - c.hora_llegada)
                 event_perm_sum += tiempo_perm
                 self.sum_tiempo_en_sistema += tiempo_perm
                 self.cli_completados += 1
                 self._to_clear_after_emit.add(c.id)
+            else:
+                # se queda a leer en biblioteca
+                c.estado = "EC LEYENDO"
+                fin_lec = self.clock + self.t_lect_biblio
+                c.fin_lect_num = fin_lec
+                c.cuando_termina_leer = fmt(fin_lec, 2)
+                lee_lugar = "Biblioteca"
+                lee_tiempo = fmt(self.t_lect_biblio, 2)
+                lee_fin = c.cuando_termina_leer
+                self.biblio_personas_cnt += 1
+        else:
+            # Devolver / Consultar => sale del sistema
+            c.estado = "DESTRUCCION"
+            c.fin_lect_num = None
+            c.cuando_termina_leer = ""
+            tiempo_perm = (self.clock - c.hora_llegada)
+            event_perm_sum += tiempo_perm
+            self.sum_tiempo_en_sistema += tiempo_perm
+            self.cli_completados += 1
+            self._to_clear_after_emit.add(c.id)
 
-            # Bibliotecario queda libre
-            b.estado = "LIBRE"
-            b.rnd = ""
-            b.demora = ""
-            b.hora = ""
-            b.hora_num = None
-            b.cliente_id = None
+        # bibliotecario queda libre
+        b.estado = "LIBRE"
+        b.rnd = ""
+        b.demora = ""
+        b.hora = ""
+        b.hora_num = None
+        b.cliente_id = None
 
-            # Intenta agarrar siguiente en cola
-            asigno, rnd_b, demora_b, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
-            if asigno:
-                self.last_b[i]["rnd"] = rnd_b
-                self.last_b[i]["demora"] = demora_b
-                self.last_b[i]["trx_rnd"] = trx_rnd
-                self.last_b[i]["trx_tipo"] = trx_tipo
+        # intenta agarrar siguiente en cola
+        asigno, rnd_b, demora_b, trx_rnd, trx_tipo = self._tomar_de_cola(idx)
+        if asigno:
+            self.last_b[i]["rnd"] = rnd_b
+            self.last_b[i]["demora"] = demora_b
+            self.last_b[i]["trx_rnd"] = trx_rnd
+            self.last_b[i]["trx_tipo"] = trx_tipo
 
-            # Actualizamos estado biblioteca
-            self._update_biblio_estado()
+        self._update_biblio_estado()
 
-            # >>>>> acumulador histórico de permanencia de clientes <<<<<
-            self.cli_perm_acum_total += event_perm_sum
+        self.cli_perm_acum_total += event_perm_sum
 
-            row = {
-                "evento": f"FIN_ATENCION_{i}({cid})",
-                "reloj": fmt(self.clock, 2),
-                "lleg_tiempo": "",
-                "lleg_minuto": fmt(self.next_arrival, 2),
-                "lleg_id": "",
-                "trx_rnd": self.last_b[i]["trx_rnd"],
-                "trx_tipo": self.last_b[i]["trx_tipo"],
+        row = {
+            "evento": f"FIN_ATENCION_{i}({cid})",
+            "reloj": fmt(self.clock, 2),
+            "lleg_tiempo": "",
+            "lleg_minuto": fmt(self.next_arrival, 2),
+            "lleg_id": "",
+            "trx_rnd": self.last_b[i]["trx_rnd"],
+            "trx_tipo": self.last_b[i]["trx_tipo"],
+            "lee_rnd": lee_rnd,
+            "lee_lugar": lee_lugar,
+            "lee_tiempo": lee_tiempo,
+            "lee_fin": lee_fin,
+            "b1_estado": self.bib[0].estado,
+            "b1_rnd": self.last_b[1]["rnd"],
+            "b1_demora": self.last_b[1]["demora"],
+            "b1_hora": self.bib[0].hora,
+            "b2_estado": self.bib[1].estado,
+            "b2_rnd": self.last_b[2]["rnd"],
+            "b2_demora": self.last_b[2]["demora"],
+            "b2_hora": self.bib[1].hora,
+            "cola": len(self.cola),
+            "biblio_estado": self.biblio_estado,
+            "biblio_personas": self._total_people_present_for_display(),
+            "est_b1_libre": fmt(self.last_iter_b1_libre),
+            "est_b2_libre": fmt(self.last_iter_b2_libre),
+            "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
+            "est_cli_perm_acum": fmt(self.cli_perm_acum_total),
+        }
 
-                # ¿Dónde Lee?
-                "lee_rnd": lee_rnd,
-                "lee_lugar": lee_lugar,     # <- ahora puede ser "Biblioteca" o "Casa"
-                "lee_tiempo": lee_tiempo,   # si "Casa", queda ""
-                "lee_fin": lee_fin,         # si "Casa", queda ""
-
-                "b1_estado": self.bib[0].estado,
-                "b1_rnd": self.last_b[1]["rnd"],
-                "b1_demora": self.last_b[1]["demora"],
-                "b1_hora": self.bib[0].hora,
-                "b2_estado": self.bib[1].estado,
-                "b2_rnd": self.last_b[2]["rnd"],
-                "b2_demora": self.last_b[2]["demora"],
-                "b2_hora": self.bib[1].hora,
-                "cola": len(self.cola),
-                "biblio_estado": self.biblio_estado,
-                "biblio_personas": self._total_people_present_for_display(),
-
-                # estadísticas pedidas:
-                "est_b1_libre": fmt(self.last_iter_b1_libre),
-                "est_b2_libre": fmt(self.last_iter_b2_libre),
-                "est_bib_ocioso_acum": fmt(self.est_bib_ocioso_acum),
-                "est_cli_perm_acum": fmt(self.cli_perm_acum_total),
-            }
-
-            cli_snap = self.build_client_snapshot()
-            return row, cli_snap
-
+        cli_snap = self.build_client_snapshot()
+        return row, cli_snap
 
     def _evento_fin_lectura(self, cid):
         """
         FIN_LECTURA(cid):
-        El cliente terminó de leer en la sala y ahora debe devolver.
+        Cliente terminó de leer en sala y ahora debe devolver.
         """
         c = self.clientes[cid]
         t = c.fin_lect_num
 
-        # Integramos ocio hasta este tiempo
         self._integrar_estadisticas_hasta(t)
 
-        # Avanzamos
         self.iteration += 1
         self.clock = t
 
-        # Permanencia aportada por salidas en ESTE evento:
-        # En FIN_LECTURA nadie se destruye directamente todavía,
-        # así que en esta iteración será 0.
-        event_perm_sum = 0.0
+        event_perm_sum = 0.0  # en FIN_LECTURA todavía no se destruye el cliente
 
         self.last_b[1].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
         self.last_b[2].update({"rnd": "", "demora": "", "trx_rnd": "", "trx_tipo": ""})
 
-        # pasa de leer a devolver
+        # pasa de leer a "Devolver"
         c.fin_lect_num = None
         c.cuando_termina_leer = ""
         c.accion_actual = "Devolver"
-        # Ya no ocupa mesa de lectura
         self.biblio_personas_cnt = max(0, self.biblio_personas_cnt - 1)
 
         libre = self._primer_bib_libre()
@@ -786,9 +686,7 @@ class SimulationEngine:
 
         self._update_biblio_estado()
 
-        # En FIN_LECTURA nadie fue destruido todavía,
-        # así que el acumulador histórico de permanencia NO aumenta
-        self.cli_perm_acum_total += event_perm_sum  # suma 0 igual, para claridad
+        self.cli_perm_acum_total += event_perm_sum  # suma 0
 
         row = {
             "evento": f"FIN_LECTURA({cid})",
@@ -861,83 +759,48 @@ class StatsWindow(tk.Toplevel):
         self.lbl_tot.configure(text=f"Ocioso TOTAL: {stats['total_ocioso']:.2f} min")
 
 
-# ----------------- Ventana de Simulación (Vector de Estado) -----------------
+# ----------------- Ventana de Simulación con tabla virtualizada -----------------
 class SimulationWindow(tk.Toplevel):
-    
-    def run_all_events(self):
-        """
-        Ejecuta automáticamente todos los eventos de la simulación hasta finalizar.
-        Genera todas las filas en el Treeview de una sola vez.
-        """
-        while True:
-            try:
-                if not self.engine.hay_mas():
-                    # Fin: integrar últimas estadísticas
-                    self.engine.finalizar_estadisticas()
-                    self.open_stats()
-                    self._refresh_stats_window(final=True)
-                    messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
-                    break
+    """
+    Esta clase reemplaza el Treeview clásico.
+    - Guarda cada fila en SQLite (no en memoria Python).
+    - Dibuja sólo las filas visibles en un Canvas (tabla virtualizada).
+    - Mantiene todas las filas accesibles con scroll vertical infinito.
+    - Encabezado doble fijo (grupos arriba + nombres de columna abajo).
+    """
 
-                row, cli_snap = self.engine.siguiente_evento()
-
-                # Asegurar columnas de todos los clientes activos
-                for cid in sorted(cli_snap.keys()):
-                    self._ensure_client_columns(cid)
-
-                # Armar fila completa
-                values = []
-                for col_id in self.tree["columns"]:
-                    if col_id.startswith("c"):
-                        try:
-                            prefix, campo = col_id.split("_", 1)
-                        except ValueError:
-                            prefix, campo = col_id, ""
-                        cid_str = prefix[1:] if prefix.startswith("c") else prefix
-                        try:
-                            cid_int = int(cid_str)
-                        except ValueError:
-                            cid_int = None
-
-                        if cid_int is not None and cid_int in cli_snap:
-                            cli_info = cli_snap[cid_int]
-                            values.append(cli_info.get(campo, ""))
-                        else:
-                            values.append("")
-                    else:
-                        if col_id == "iteracion":
-                            values.append(str(self.engine.iteration))
-                        else:
-                            v = row.get(col_id, "")
-                            values.append("" if v == "" else str(v))
-
-                self.tree.insert("", "end", values=values)
-                self._draw_group_headers()
-                self._refresh_stats_window(final=False)
-
-            except StopIteration:
-                # Fin de simulación
-                self.open_stats()
-                self._refresh_stats_window(final=True)
-                messagebox.showinfo("Fin de simulación", "Se alcanzó el límite de tiempo o iteraciones.")
-                break
-
-    
     def __init__(self, master, config_dict):
         super().__init__(master)
-        self.title("Vector de Estado - Simulación (Streaming memoria optimizada)")
+        self.title("Vector de Estado - Simulación (Virtualizado / SQLite)")
         self.geometry("1400x760")
         self.minsize(1200, 560)
 
+        # Motor de simulación
         self.engine = SimulationEngine(config_dict)
         self.modo_auto = bool(config_dict["simulacion"].get("modo_auto", False))
-        self.stats_win = None
-        self.known_clients = []  # clientes que ya generaron columnas
 
+        self.stats_win = None
+        self.known_clients = []  # clientes que ya generaron columnas dinámicas
+
+        # --- DB temporal en disco (para no comer RAM con miles de filas) ---
+        tmpfile = tempfile.NamedTemporaryFile(prefix="sim_", suffix=".db", delete=False)
+        self._db_path = tmpfile.name
+        tmpfile.close()
+        self._db_conn = sqlite3.connect(self._db_path)
+        self._init_db()
+        self.total_rows = 0  # cuántas filas totales ya guardamos
+
+        # Constantes de layout visual
+        self.row_height = 24              # altura de cada fila dibujada
+        self.header_h_group = 30          # alto fila "grupos"
+        self.header_h_total = 60          # alto total header (grupos + nombres columnas)
+        self.col_positions = []           # [(x0,x1), ...] acumulado según self.columns
+
+        # --- FRAME raíz ---
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
 
-        # Barra superior
+        # --- Barra superior con config + botones ---
         top = ttk.Frame(root)
         top.pack(fill="x")
 
@@ -956,22 +819,16 @@ class SimulationWindow(tk.Toplevel):
 
         ttk.Button(top, text="Estadísticas", command=self.open_stats).pack(side="right", padx=(6, 0))
         if not self.modo_auto:
-            # Solo en modo manual mostramos "Siguiente evento"
             ttk.Button(top, text="Siguiente evento", command=self.on_next).pack(side="right")
-        else:
-            # En modo auto podés querer un botón para "Pausar" o "Ejecutar todo ahora".
-            # Si querés, dejalo así de simple y que corra solo:
-            pass
 
-
-        # Definición de columnas base
+        # --- Definición de columnas base y grupos de encabezado ---
         self.columns = []
         self.groups = []
 
         def add_col(cid, text, w):
             self.columns.append({"id": cid, "text": text, "w": w})
 
-        # Grupo "" (iteración / evento / reloj)
+        # Grupo "" (iteración/evento/reloj)
         add_col("iteracion", "Numero de iteracion", 160)
         add_col("evento", "Evento", 180)
         add_col("reloj", "Reloj (minutos)", 130)
@@ -979,7 +836,7 @@ class SimulationWindow(tk.Toplevel):
         # Grupo LLEGADA_CLIENTE
         add_col("lleg_tiempo", "TIEMPO", 90)
         add_col("lleg_minuto", "MINUTO QUE LLEGA", 165)
-
+    
 
         # Grupo TRANSACCION
         add_col("trx_rnd", "RND", 80)
@@ -1011,18 +868,14 @@ class SimulationWindow(tk.Toplevel):
         add_col("biblio_personas", "Personas en la biblioteca (MAXIMO 20)", 270)
 
         # Grupo ESTADISTICAS · BIBLIOTECARIOS
-        # TIEMPO LIBRE B1 / B2 -> solo en ESTA iteración
-        # ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS -> acumulado histórico total
         add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO1", 230)
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
 
-        # Grupo ESTADISTICAS · CLIENTESa
-        # ACUMULADOR TIEMPO PERMANENCIA -> acumulado histórico de (reloj actual - hora_llegada)
-        # SOLO cuando el cliente pasa a DESTRUCCION
+        # Grupo ESTADISTICAS · CLIENTES
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
 
-        # Índices de grupos para el header de arriba
+        # Indices de grupos para header superior
         self.groups = [
             ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 5),
@@ -1036,165 +889,351 @@ class SimulationWindow(tk.Toplevel):
             ("ESTADISTICAS · CLIENTES", 26, 26),
         ]
 
-        # --- UI: canvas de encabezado de grupos + Treeview ---
+        # --- UI principal: header fijo + canvas scrollable ---
         wrapper = ttk.Frame(root)
         wrapper.pack(fill="both", expand=True)
 
+        # header_canvas: dibuja grupos + nombres de columnas
         self.header_canvas = tk.Canvas(
             wrapper,
-            height=40,  # más alto para que se vea mejor
+            height=self.header_h_total,
             background="#ffffff",
             highlightthickness=0
         )
         self.header_canvas.pack(fill="x", side="top")
 
-        self.tree = ttk.Treeview(wrapper, show="headings", height=20)
-        self.tree.pack(fill="both", expand=True, side="left")
+        # body frame con canvas + scrollbar vertical
+        body_frame = ttk.Frame(wrapper)
+        body_frame.pack(fill="both", expand=True, side="left")
 
-        yscroll = ttk.Scrollbar(wrapper, orient="vertical", command=self.tree.yview)
-        yscroll.pack(fill="y", side="right")
+        self.body_canvas = tk.Canvas(
+            body_frame,
+            background="#ffffff",
+            highlightthickness=0
+        )
+        self.body_canvas.pack(fill="both", expand=True, side="left")
 
-        xscroll = ttk.Scrollbar(root, orient="horizontal")
-        xscroll.pack(fill="x", side="bottom")
+        self.vscrollbar = ttk.Scrollbar(
+            body_frame,
+            orient="vertical",
+            command=self._on_vscroll
+        )
+        self.vscrollbar.pack(fill="y", side="right")
 
-        def on_xscroll(*args):
-            # mover ambos: tabla + header de grupos
-            self.tree.xview(*args)
-            self.header_canvas.xview(*args)
+        # scrollbar horizontal compartida por header + body
+        self.hscrollbar = ttk.Scrollbar(
+            root,
+            orient="horizontal",
+            command=self._on_hscroll
+        )
+        self.hscrollbar.pack(fill="x", side="bottom")
 
-        def on_tree_xscroll(lo, hi):
-            xscroll.set(lo, hi)
-            self.header_canvas.xview_moveto(lo)
+        # conectar scrollcommands
+        self.body_canvas.configure(
+            yscrollcommand=self._on_yview_changed,
+            xscrollcommand=self.hscrollbar.set
+        )
+        self.header_canvas.configure(
+            xscrollcommand=self.hscrollbar.set
+        )
 
-        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=on_tree_xscroll)
-        xscroll.configure(command=on_xscroll)
+        # bindings para repintar cuando cambia tamaño o se hace scroll con rueda
+        self.body_canvas.bind("<Configure>", self._on_body_configure)
+        self.body_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.body_canvas.bind("<Button-4>", self._on_mousewheel_linux)   # Linux up
+        self.body_canvas.bind("<Button-5>", self._on_mousewheel_linux)   # Linux down
 
-        # Aplicar columnas al Treeview y dibujar encabezados
-        self._apply_columns()
-        self._draw_group_headers()
+        # calcular posiciones iniciales de columnas y dibujar headers
+        self._recompute_columns_layout()
 
-        # Inserto fila de INICIALIZACION
+        # insertar fila inicial "INICIALIZACION" en la DB y renderizar
         self._insert_initialization_row()
-        # Ejecutar toda la simulación automáticamente si así se configuró
+
+        # si modo_auto está activo, disparamos toda la simulación
         if self.modo_auto:
-            # Dejamos respirar a la UI y luego corremos todo
             self.after(100, self.run_all_events)
 
+        # liberar el archivo sqlite al cerrar
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # --- Helpers UI ---
-    def open_stats(self):
-        if self.stats_win is None or not self.stats_win.winfo_exists():
-            self.stats_win = StatsWindow(self, self.engine)
-        else:
-            self.stats_win.lift()
-            self.stats_win.refresh(final=False)
-
-    def _refresh_stats_window(self, final=False):
-        if self.stats_win is not None and self.stats_win.winfo_exists():
-            self.stats_win.refresh(final=final)
-
-    def _apply_columns(self):
-        """
-        Crea las headings del Treeview en base a self.columns actual.
-        """
-        col_ids = [c["id"] for c in self.columns]
-        self.tree["columns"] = col_ids
-
-        for c in self.columns:
-            self.tree.heading(c["id"], text=c["text"], anchor="center")
-            self.tree.column(
-                c["id"],
-                width=c["w"],
-                minwidth=40,
-                anchor="center",
-                stretch=False
+    # ---------- manejo de DB / scroll virtualizado ----------
+    def _init_db(self):
+        cur = self._db_conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS filas (
+                idx INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_json TEXT NOT NULL
             )
+        """)
+        self._db_conn.commit()
 
-        self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), 40))
+    def _on_close(self):
+        try:
+            self._db_conn.close()
+        except Exception:
+            pass
+        try:
+            os.remove(self._db_path)
+        except Exception:
+            pass
+        self.destroy()
 
-    def _total_width(self):
-        total = 0
-        for c in self.columns:
-            total += self.tree.column(c["id"], option="width")
-        return total
+    def _update_scrollregion(self):
+        """
+        Ajusta las áreas de scroll de ambos canvas según
+        - ancho total de columnas
+        - cantidad total de filas
+        """
+        total_w = sum(c["w"] for c in self.columns)
+        total_h_rows = self.total_rows * self.row_height
 
-    def _col_x_positions(self):
-        xs = []
+        self.header_canvas.configure(
+            scrollregion=(0, 0, total_w, self.header_h_total)
+        )
+        self.body_canvas.configure(
+            scrollregion=(0, 0, total_w, total_h_rows)
+        )
+
+    def _recompute_columns_layout(self):
+        """
+        Recalcula self.col_positions = [(x0,x1), ...] acumulando widths,
+        actualiza scrollregion, redibuja header y filas visibles.
+        """
+        self.col_positions = []
         acc = 0
         for c in self.columns:
-            w = self.tree.column(c["id"], option="width")
-            xs.append((acc, acc + w))
-            acc += w
-        return xs
+            x0 = acc
+            x1 = acc + c["w"]
+            self.col_positions.append((x0, x1))
+            acc = x1
+
+        self._update_scrollregion()
+        self._draw_group_headers()
+        self._redraw_visible_rows()
 
     def _draw_group_headers(self):
         """
-        Dibuja la línea superior con los grupos:
-        LLEGADA_CLIENTE, TRANSACCION, Cliente 1, Cliente 2, etc.
-        Llamamos esto:
-          - al iniciar
-          - al agregar columnas de un cliente nuevo
-          - al final de cada on_next()
-        para que SIEMPRE se vea el encabezado.
+        Dibuja:
+        - Fila superior de grupos (LLEGADA_CLIENTE, TRANSACCION, etc.)
+        - Fila inferior con los nombres de cada columna (Evento, Reloj, etc.)
+        Ambas quedan fijas.
         """
         self.header_canvas.delete("all")
-        xs = self._col_x_positions()
-        h = 40
+
+        xs = self.col_positions
+        hg = self.header_h_group
+        ht = self.header_h_total
 
         group_bg_color = GROUP_BG
         group_border_color = GROUP_BORDER
         fine_line_color = "#e5e7eb"
         group_separator_color = "#555555"
+
         group_boundaries = set()
 
+        # 1) Cajas de grupo (fila superior)
         for text, i0, i1 in self.groups:
             if i0 >= len(xs) or i1 >= len(xs):
                 continue
             x0 = xs[i0][0]
             x1 = xs[i1][1]
 
-            # caja del grupo
+            # rectángulo del grupo
             self.header_canvas.create_rectangle(
-                x0, 0, x1, h,
+                x0, 0, x1, hg,
                 fill=group_bg_color,
                 outline=group_border_color
             )
-            # título del grupo
+
             if text:
                 self.header_canvas.create_text(
-                    (x0 + x1) / 2, h / 2,
+                    (x0 + x1) / 2, hg / 2,
                     text=text,
                     anchor="center",
                     font=("Segoe UI", 9, "bold"),
                     fill="#000000"
                 )
 
-            # línea inferior del grupo
+            # línea inferior de grupo
             self.header_canvas.create_line(
-                x0, h - 1, x1, h - 1,
+                x0, hg - 1, x1, hg - 1,
                 fill=group_separator_color,
                 width=1
             )
             group_boundaries.add(x0)
             group_boundaries.add(x1)
 
-        # líneas finas por cada columna
-        for _, x1 in xs:
-            self.header_canvas.create_line(x1, 0, x1, h, fill=fine_line_color)
+        # 2) Encabezado de cada columna (fila inferior)
+        for col_idx, col in enumerate(self.columns):
+            x0, x1 = xs[col_idx]
+            # fondo de celda header de columna
+            self.header_canvas.create_rectangle(
+                x0, hg, x1, ht,
+                fill="#f8fafc",
+                outline="#d1d5db",
+                width=1
+            )
+            # texto centrado
+            self.header_canvas.create_text(
+                (x0 + x1) / 2,
+                hg + (ht - hg) / 2,
+                text=col["text"],
+                anchor="center",
+                font=("Segoe UI", 8),
+                fill="#000000"
+            )
 
-        # remarcar bordes de grupo
+        # 3) Líneas verticales finas en límites de columnas
+        for _, x1 in xs:
+            self.header_canvas.create_line(
+                x1, 0, x1, ht,
+                fill=fine_line_color
+            )
+
+        # 4) remarcar bordes de grupo
         for x_boundary in sorted(list(group_boundaries)):
             if x_boundary == 0:
                 continue
             self.header_canvas.create_line(
-                x_boundary, 0, x_boundary, h,
+                x_boundary, 0,
+                x_boundary, hg,
                 fill=group_separator_color,
                 width=1
             )
 
-        self.header_canvas.configure(scrollregion=(0, 0, self._total_width(), h))
+        # asegurar scrollregion del header
+        self.header_canvas.configure(
+            scrollregion=(0, 0, sum(c["w"] for c in self.columns), ht)
+        )
+
+    def _build_row_map(self, base_row: dict, cli_snap: dict, iteration_value: int):
+        """
+        Construye un dict {col_id: valor} alineado con self.columns actual.
+        Esto es lo que guardaremos en SQLite.
+        """
+        row_map = {}
+        for col in self.columns:
+            col_id = col["id"]
+            if col_id.startswith("c"):
+                # columnas dinámicas de clientes: cX_estado, cX_hora_llegada, etc.
+                parts = col_id.split("_", 1)
+                prefix = parts[0]
+                campo = parts[1] if len(parts) > 1 else ""
+                cid_str = prefix[1:] if prefix.startswith("c") else prefix
+                try:
+                    cid_int = int(cid_str)
+                except ValueError:
+                    cid_int = None
+
+                if cid_int is not None and cid_int in cli_snap:
+                    cli_info = cli_snap[cid_int]
+                    if campo == "estado":
+                        row_map[col_id] = cli_info.get("estado", "")
+                    elif campo == "hora_llegada":
+                        row_map[col_id] = cli_info.get("hora_llegada", "")
+                    elif campo == "a_que_fue":
+                        row_map[col_id] = cli_info.get("a_que_fue", "")
+                    elif campo == "cuando_termina":
+                        row_map[col_id] = cli_info.get("cuando_termina", "")
+                    else:
+                        row_map[col_id] = ""
+                else:
+                    row_map[col_id] = ""
+            else:
+                if col_id == "iteracion":
+                    row_map[col_id] = str(iteration_value)
+                else:
+                    v = base_row.get(col_id, "")
+                    row_map[col_id] = "" if v == "" else str(v)
+        return row_map
+
+    def _save_row_to_db(self, row_map: dict):
+        """
+        Inserta la fila en SQLite y actualiza contadores/scroll.
+        """
+        cur = self._db_conn.cursor()
+        cur.execute(
+            "INSERT INTO filas (data_json) VALUES (?)",
+            (json.dumps(row_map),)
+        )
+        self._db_conn.commit()
+        self.total_rows += 1
+        self._update_scrollregion()
+
+    def _fetch_rows_range(self, start_index: int, end_index: int):
+        """
+        Lee filas [start_index, end_index) desde SQLite,
+        y las devuelve como lista de dicts.
+        """
+        if start_index < 0:
+            start_index = 0
+        if end_index > self.total_rows:
+            end_index = self.total_rows
+        limit = end_index - start_index
+        if limit <= 0:
+            return []
+
+        cur = self._db_conn.cursor()
+        cur.execute(
+            "SELECT data_json FROM filas ORDER BY idx LIMIT ? OFFSET ?",
+            (limit, start_index)
+        )
+        rows = []
+        for (dj,) in cur.fetchall():
+            rows.append(json.loads(dj))
+        return rows
+
+    def _redraw_visible_rows(self):
+        """
+        Borra las celdas dibujadas en body_canvas y vuelve a dibujar
+        SOLO las filas visibles en pantalla según el scroll actual.
+        """
+        self.body_canvas.delete("rowcell")
+
+        # coordenadas visibles actuales
+        y0 = self.body_canvas.canvasy(0)
+        h = self.body_canvas.winfo_height()
+        if h <= 0:
+            return
+
+        first_row = int(y0 // self.row_height)
+        last_row = int((y0 + h) // self.row_height) + 1
+
+        # traemos de SQLite sólo ese rango
+        visible_rows = self._fetch_rows_range(first_row, last_row)
+
+        # dibujar cada fila
+        for i, row_map in enumerate(visible_rows):
+            row_idx = first_row + i
+            y_top = row_idx * self.row_height
+            y_bot = y_top + self.row_height
+
+            bg = "#ffffff" if (row_idx % 2 == 0) else "#f9fafb"
+
+            for col_idx, col in enumerate(self.columns):
+                x0, x1 = self.col_positions[col_idx]
+                # celda
+                self.body_canvas.create_rectangle(
+                    x0, y_top, x1, y_bot,
+                    fill=bg,
+                    outline="#d1d5db",
+                    width=1,
+                    tags="rowcell"
+                )
+                text_val = row_map.get(col["id"], "")
+                self.body_canvas.create_text(
+                    x0 + 4,
+                    y_top + self.row_height / 2,
+                    text=text_val,
+                    anchor="w",
+                    font=("Segoe UI", 9),
+                    tags="rowcell"
+                )
 
     def _insert_initialization_row(self):
+        """
+        Inserta la primera fila ("INICIALIZACION") en la DB y la dibuja.
+        """
         eng = self.engine
         eng._update_biblio_estado()
 
@@ -1222,34 +1261,40 @@ class SimulationWindow(tk.Toplevel):
             "cola": len(self.engine.cola),
             "biblio_estado": eng.biblio_estado,
             "biblio_personas": eng._total_people_present_for_display(),
-            # al inicio todo está en cero
             "est_b1_libre": fmt(0),
             "est_b2_libre": fmt(0),
             "est_bib_ocioso_acum": fmt(0),
             "est_cli_perm_acum": fmt(0),
         }
 
-        vals = []
-        for col_id in self.tree["columns"]:
-            if col_id.startswith("c"):
-                vals.append("")
-            elif col_id == "iteracion":
-                vals.append("0")
+        # armamos row_map para TODAS las columnas actuales (no hay clientes aún)
+        row_map = {}
+        for col in self.columns:
+            cid = col["id"]
+            if cid == "iteracion":
+                row_map[cid] = "0"
+            elif cid.startswith("c"):
+                row_map[cid] = ""
             else:
-                vals.append(str(base.get(col_id, "")))
-        self.tree.insert("", "end", values=vals)
+                row_map[cid] = str(base.get(cid, ""))
+
+        self._save_row_to_db(row_map)
+        self._redraw_visible_rows()
 
     def _ensure_client_columns(self, cid: int):
         """
-        Si aparece un cliente nuevo (por ejemplo Cliente 5),
+        Si aparece un cliente nuevo que nunca vimos antes,
         agregamos al final 4 columnas:
-          c5_estado, c5_hora_llegada, c5_a_que_fue, c5_cuando_termina
-        y creamos un grupo "Cliente 5" para el header gráfico.
+          c{cid}_estado,
+          c{cid}_hora_llegada,
+          c{cid}_a_que_fue,
+          c{cid}_cuando_termina
+        y creamos un grupo "Cliente {cid}" en el header.
+        Luego recalculamos layout y redibujamos.
         """
         if cid in self.known_clients:
-            return  # El cliente ya existe, no hacemos nada
+            return
 
-        # 1. Actualizar la definición de columnas en memoria
         self.known_clients.append(cid)
         start_idx = len(self.columns)
 
@@ -1259,101 +1304,167 @@ class SimulationWindow(tk.Toplevel):
             {"id": f"c{cid}_a_que_fue", "text": "A QUE FUE", "w": 120},
             {"id": f"c{cid}_cuando_termina", "text": "Cuando termina de leer", "w": 180},
         ]
-
         self.columns.extend(new_cols)
         end_idx = len(self.columns) - 1
 
-        # 2. Registramos este bloque como nuevo grupo visual "Cliente X"
+        # agregamos bloque de grupo visual
         self.groups.append((f"Cliente {cid}", start_idx, end_idx))
 
-        # 3. Re-aplicamos TODAS las columnas (viejas + nuevas) al Treeview
-        #    Esto leerá de self.columns y configurará todo de nuevo.
-        self._apply_columns()
+        # recalcular posiciones de columnas, scrollregions y headers
+        self._recompute_columns_layout()
 
-        # 4. Redibujamos el header de grupos (que _apply_columns no hace)
-        self._draw_group_headers()
+    def _process_event(self, row_base: dict, cli_snap: dict):
+        """
+        Paso común para on_next() y run_all_events():
+        - asegura columnas de los clientes activos
+        - arma el row_map en función del estado actual de columnas
+        - guarda en DB
+        - redibuja vista
+        - refresca stats
+        """
+        # columnas dinámicas por cada cliente que aparece en esta iteración
+        for cid in sorted(cli_snap.keys()):
+            self._ensure_client_columns(cid)
+
+        # armar fila en formato {col_id: valor}
+        row_map = self._build_row_map(
+            base_row=row_base,
+            cli_snap=cli_snap,
+            iteration_value=self.engine.iteration
+        )
+
+        # persistir en disco y actualizar scroll
+        self._save_row_to_db(row_map)
+
+        # redibujar filas visibles
+        self._redraw_visible_rows()
+
+        # refrescar ventana de estadísticas si está abierta
+        self._refresh_stats_window(final=False)
+
+    # ---------- Simulación ----------
+    def run_all_events(self):
+        """
+        Ejecuta automáticamente todos los eventos restantes hasta que la simulación termine.
+        """
+        while True:
+            try:
+                if not self.engine.hay_mas():
+                    # se acabó: integrar stats finales, mostrar alerta, abrir stats
+                    self.engine.finalizar_estadisticas()
+                    self.open_stats()
+                    self._refresh_stats_window(final=True)
+                    messagebox.showinfo(
+                        "Fin de simulación",
+                        "Se completó toda la simulación."
+                    )
+                    break
+
+                row_base, cli_snap = self.engine.siguiente_evento()
+                self._process_event(row_base, cli_snap)
+
+            except StopIteration as e:
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+                messagebox.showinfo(
+                    "Fin de simulación",
+                    str(e)
+                )
+                break
 
     def on_next(self):
         """
-        Botón "Siguiente evento":
-        - Le pide al motor el siguiente evento.
-        - Actualiza columnas de clientes si aparecen nuevos.
-        - Inserta la nueva fila.
-        - Redibuja SIEMPRE el header de grupos para que nunca desaparezca.
+        Avanza un solo evento (modo manual).
         """
         try:
             if not self.engine.hay_mas():
-                stats = self.engine.finalizar_estadisticas()
+                self.engine.finalizar_estadisticas()
                 self.open_stats()
                 self._refresh_stats_window(final=True)
                 messagebox.showinfo(
                     "Fin de simulación",
                     "No hay más eventos (límite de tiempo o iteraciones alcanzado)."
                 )
-                self._draw_group_headers()
                 return
 
-            row, cli_snap = self.engine.siguiente_evento()
+            row_base, cli_snap = self.engine.siguiente_evento()
+            self._process_event(row_base, cli_snap)
 
         except StopIteration as e:
             self.open_stats()
             self._refresh_stats_window(final=True)
             messagebox.showinfo("Fin de simulación", str(e))
-            self._draw_group_headers()
-            return
 
-        # Creamos columnas por cada cliente activo (incluye los que acaban de destruirse en ESTA fila)
-        for cid in sorted(cli_snap.keys()):
-            self._ensure_client_columns(cid)
+    # ---------- Helpers UI ----------
+    def open_stats(self):
+        if self.stats_win is None or not self.stats_win.winfo_exists():
+            self.stats_win = StatsWindow(self, self.engine)
+        else:
+            self.stats_win.lift()
+            self.stats_win.refresh(final=False)
 
-        # Preparamos los valores para TODAS las columnas actuales
-        values = []
-        for col_id in self.tree["columns"]:
-            if col_id.startswith("c"):
-                # tipo c<ID>_<campo>
-                try:
-                    prefix, campo = col_id.split("_", 1)
-                except ValueError:
-                    prefix, campo = col_id, ""
-                cid_str = prefix[1:] if prefix.startswith("c") else prefix
-                try:
-                    cid_int = int(cid_str)
-                except ValueError:
-                    cid_int = None
+    def _refresh_stats_window(self, final=False):
+        if self.stats_win is not None and self.stats_win.winfo_exists():
+            self.stats_win.refresh(final=final)
 
-                if cid_int is not None and cid_int in cli_snap:
-                    cli_info = cli_snap[cid_int]
-                    if campo == "estado":
-                        values.append(cli_info.get("estado", ""))
-                    elif campo == "hora_llegada":
-                        values.append(cli_info.get("hora_llegada", ""))
-                    elif campo == "a_que_fue":
-                        values.append(cli_info.get("a_que_fue", ""))
-                    elif campo == "cuando_termina":
-                        values.append(cli_info.get("cuando_termina", ""))
-                    else:
-                        values.append("")
-                else:
-                    # cliente ya destruido en una iteración anterior -> en blanco
-                    values.append("")
-            else:
-                if col_id == "iteracion":
-                    values.append(str(self.engine.iteration))
-                else:
-                    v = row.get(col_id, "")
-                    values.append("" if v == "" else str(v))
+    # ---------- Scroll / eventos de canvas ----------
+    def _on_vscroll(self, *args):
+        """
+        Scrollbar vertical movida → movemos canvas y repintamos filas visibles.
+        """
+        self.body_canvas.yview(*args)
+        self._redraw_visible_rows()
 
-        self.tree.insert("", "end", values=values)
+    def _on_hscroll(self, *args):
+        """
+        Scrollbar horizontal movida → movemos ambos canvas (header y body)
+        """
+        self.header_canvas.xview(*args)
+        self.body_canvas.xview(*args)
+        # header no necesita redibujar; body sólo se desplaza en x.
 
-        # Redibujamos SIEMPRE el encabezado de grupos arriba
-        self._draw_group_headers()
+    def _on_yview_changed(self, lo, hi):
+        """
+        Cuando el canvas cambia su yview (por mousewheel, etc.),
+        actualizamos la scrollbar vertical y repintamos filas visibles.
+        """
+        self.vscrollbar.set(lo, hi)
+        self._redraw_visible_rows()
 
-        # refrescamos ventana de stats si está abierta
-        self._refresh_stats_window(final=False)
+    def _on_body_configure(self, event=None):
+        """
+        Cuando cambia el tamaño del canvas (ej. resize de ventana),
+        redibujamos la parte visible.
+        """
+        self._redraw_visible_rows()
+
+    def _on_mousewheel(self, event):
+        """
+        Scroll con rueda del mouse (Windows/macOS).
+        """
+        delta = int(-1 * (event.delta / 120))
+        self.body_canvas.yview_scroll(delta, "units")
+        self._redraw_visible_rows()
+
+    def _on_mousewheel_linux(self, event):
+        """
+        Scroll con rueda en Linux (Button-4 / Button-5).
+        """
+        if event.num == 4:
+            self.body_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.body_canvas.yview_scroll(1, "units")
+        self._redraw_visible_rows()
 
 
 # ----------------- Ventana Principal (input y validación) -----------------
 class App(tk.Tk):
+    """
+    Pantalla de parámetros + botón "Generar".
+    Esta parte es básicamente tu App original: pide X, N, porcentajes, etc.,
+    arma el diccionario de config y abre SimulationWindow con esa config.
+    """
+
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
@@ -1365,51 +1476,43 @@ class App(tk.Tk):
         self.style.configure("Ok.TLabel", foreground="#15803d")
         self.style.configure("Bad.TLabel", foreground="#dc2626")
 
-        # --- INICIO: MODIFICACIÓN PARA SCROLLBAR ---
-
-        # 1. Hacemos que la fila y columna principal de la ventana (self) se expandan
+        # --- layout scrolleable del formulario de parámetros ---
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
-        # 2. Frame principal que contendrá el canvas y el scrollbar
         main_frame = ttk.Frame(self)
         main_frame.grid(row=0, column=0, sticky="nsew")
 
-        # 3. Hacemos que la fila 0 y col 0 de main_frame se expandan
         main_frame.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
 
-        # 4. Canvas y Scrollbar
         self.canvas = tk.Canvas(main_frame)
-        self.scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollbar = ttk.Scrollbar(
+            main_frame,
+            orient="vertical",
+            command=self.canvas.yview
+        )
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
-        # 5. Posicionamos con grid
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
 
-        # 6. El frame INTERNO ('root') que contendrá los widgets
-        #    Le damos padding aquí en lugar de al main_frame
         root = ttk.Frame(self.canvas, padding=12)
+        self.canvas_window = self.canvas.create_window(
+            (0, 0),
+            window=root,
+            anchor="nw"
+        )
 
-        # 7. Creamos la "ventana" del canvas
-        self.canvas_window = self.canvas.create_window((0, 0), window=root, anchor="nw")
-
-        # Hacemos que la columna 0 de 'root' se expanda (para los LabelFrames)
         root.columnconfigure(0, weight=1)
 
-        # Bindings
         root.bind("<Configure>", self.on_frame_configure)
         self.canvas.bind("<Configure>", self.on_canvas_configure)
         self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind_all("<Button-4>", self.on_mousewheel_linux)
         self.canvas.bind_all("<Button-5>", self.on_mousewheel_linux)
 
-        # --- FIN: MODIFICACIÓN PARA SCROLLBAR ---
-
-        # El 'root' original ahora es el frame scrolleable
-        # El resto del código no necesita cambios, ya que usa 'root'
-
+        # Campos
         self.fields = {}
 
         # --- 1) Simulación ---
@@ -1432,14 +1535,13 @@ class App(tk.Tk):
             sim, "j_inicio", "j (minuto de inicio)", 0, 0, 10_000,
             "Minuto desde el cual se comienzan a mostrar las i iteraciones."
         )
-        # Checkbox: ejecutar automáticamente toda la simulación
-        self.auto_var = tk.BooleanVar(value=True)  # True = auto por defecto (cámbialo si querés)
+
+        self.auto_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             sim,
             text="Ejecutar automáticamente (sin 'Siguiente evento')",
             variable=self.auto_var
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
-
 
         # --- 2) Llegadas ---
         lleg = ttk.LabelFrame(root, text="2) Llegadas")
@@ -1470,7 +1572,8 @@ class App(tk.Tk):
         cons.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         cons.columnconfigure(1, weight=1)
 
-        self._mk_int(cons, "uni_a", "A (min)", 2, 0, 10_000, "Debe cumplirse A < B y A ≠ B.")
+        self._mk_int(cons, "uni_a", "A (min)", 2, 0, 10_000,
+                     "Debe cumplirse A < B y A ≠ B.")
         self._mk_int(cons, "uni_b", "B (min)", 5, 0, 10_000)
 
         # --- 5) Lectura ---
@@ -1497,7 +1600,6 @@ class App(tk.Tk):
         # --- 6) Resultado JSON ---
         salida = ttk.LabelFrame(root, text="6) Resultado")
         salida.grid(row=5, column=0, sticky="nsew", pady=(0, 8))
-        # root.rowconfigure(5, weight=1) # No es necesario en un frame scrolleable
         salida.columnconfigure(0, weight=1)
 
         self.txt_out = tk.Text(salida, height=10)
@@ -1516,7 +1618,7 @@ class App(tk.Tk):
         self._update_pct_sum()
         self._update_queda()
 
-    # ---- helpers de UI principal ----
+    # ---- helpers de UI principal (formulario) ----
     def _mk_int(self, parent, key, label, default, lo, hi, help_=None, on_change=None):
         row = ttk.Frame(parent)
 
@@ -1573,29 +1675,22 @@ class App(tk.Tk):
         queda = max(0, min(100, 100 - p))
         self.lbl_queda.configure(text=str(queda))
 
-    # --- INICIO: MÉTODOS AÑADIDOS PARA SCROLLBAR ---
-
+    # Scroll del formulario (pantalla de parámetros)
     def on_frame_configure(self, event=None):
-        """Actualiza el scrollregion del canvas."""
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def on_canvas_configure(self, event=None):
-        """Asegura que el frame interno llene el ancho del canvas."""
         canvas_width = event.width
         self.canvas.itemconfig(self.canvas_window, width=canvas_width)
 
     def on_mousewheel(self, event):
-        """Maneja el scroll con la rueda del mouse (Windows/macOS)."""
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def on_mousewheel_linux(self, event):
-        """Maneja el scroll con la rueda del mouse (Linux)."""
         if event.num == 4:
             self.canvas.yview_scroll(-1, "units")
         elif event.num == 5:
             self.canvas.yview_scroll(1, "units")
-
-    # --- FIN: MÉTODOS AÑADIDOS PARA SCROLLBAR ---
 
     def reset_defaults(self):
         defaults = {
@@ -1621,7 +1716,7 @@ class App(tk.Tk):
         self.txt_out.delete("1.0", "end")
 
     def on_generate(self):
-        # limpiamos estilos rojos
+        # limpiar estilos rojos
         for meta in self.fields.values():
             meta["entry"].configure(style="TEntry")
 
@@ -1679,7 +1774,6 @@ class App(tk.Tk):
             messagebox.showerror("Validación", "Revisá:\n\n" + "\n".join(errors))
             return
 
-        # Armamos el dict final de configuración
         cfg = {
             "simulacion": {
                 "tiempo_limite_min": t_lim,
@@ -1709,14 +1803,14 @@ class App(tk.Tk):
             }
         }
 
-        # Mostrar config en el textbox y copiar al portapapeles
+        # Mostrar config en el textbox y llevar al portapapeles
         self.txt_out.delete("1.0", "end")
         pretty = json.dumps(cfg, indent=2, ensure_ascii=False)
         self.txt_out.insert("1.0", pretty)
         self.clipboard_clear()
         self.clipboard_append(pretty)
 
-        # Abrir la ventana de simulación con esta config
+        # Abrir la ventana de simulación con tabla virtualizada/SQLite
         SimulationWindow(self, cfg)
 
 
