@@ -1142,9 +1142,19 @@ class SimulationWindow(tk.Toplevel):
             else:
                 if col_id == "iteracion":
                     row_map[col_id] = str(iteration_value)
+                elif col_id == "cola":
+                    # Siempre mostrar el largo de la cola como número, aunque sea 0
+                    v = base_row.get("cola", 0)
+                    row_map[col_id] = str(v)
                 else:
                     v = base_row.get(col_id, "")
-                    row_map[col_id] = "" if v == "" else str(v)
+                    # si es None → "", si es "" → "", si es número → str(n)
+                    if v is None:
+                        row_map[col_id] = ""
+                    elif v == "":
+                        row_map[col_id] = ""
+                    else:
+                        row_map[col_id] = str(v)
         return row_map
 
     def _save_row_to_db(self, row_map: dict):
@@ -1273,10 +1283,16 @@ class SimulationWindow(tk.Toplevel):
             cid = col["id"]
             if cid == "iteracion":
                 row_map[cid] = "0"
+            elif cid == "cola":
+                row_map[cid] = str(base.get("cola", 0))
             elif cid.startswith("c"):
                 row_map[cid] = ""
             else:
-                row_map[cid] = str(base.get(cid, ""))
+                v = base.get(cid, "")
+                if v is None or v == "":
+                    row_map[cid] = ""
+                else:
+                    row_map[cid] = str(v)
 
         self._save_row_to_db(row_map)
         self._redraw_visible_rows()
