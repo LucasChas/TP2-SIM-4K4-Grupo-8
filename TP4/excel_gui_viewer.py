@@ -4,6 +4,11 @@ import json
 import random
 import math
 from collections import deque
+import sqlite3
+import tempfile
+import threading
+import queue
+import os
 
 APP_TITLE = "Parámetros de Simulación - Biblioteca UTN - Grupo 8"
 ROW_EVEN_BG = "#ffffff"      # fila par
@@ -45,10 +50,21 @@ def fmt(x, nd=2):
 
 # ----------------- Modelos -----------------
 class Cliente:
+    __slots__ = (
+        "id",
+        "estado",
+        "hora_llegada",
+        "hora_entrada_cola",
+        "a_que_fue_inicial",
+        "accion_actual",
+        "fin_lect_num",
+        "cuando_termina_leer",
+    )
+
     def __init__(self, cid, hora_llegada):
         self.id = cid
         # estado puede ser:
-        # "EN COLA", "SIENDO ATENDIDO(1)", "SIENDO ATENDIDO(2)", "EC LEYENDO", "DESTRUCCION"
+        # "EN COLA", "SIENDO ATENDIDO(1)", "SIENDO ATENDIDO(2)", "LB", "DESTRUCCION"
         self.estado = "EN COLA"
 
         # Tiempos clave
@@ -65,6 +81,8 @@ class Cliente:
 
 
 class Bibliotecario:
+    __slots__ = ("estado", "rnd", "demora", "hora", "hora_num", "cliente_id")
+
     def __init__(self):
         self.estado = "LIBRE"     # "LIBRE" / "OCUPADO"
         self.rnd = ""             # RND del servicio asignado en ESTE evento
@@ -72,6 +90,72 @@ class Bibliotecario:
         self.hora = ""            # Fin de servicio estimado (string)
         self.hora_num = None      # Fin de servicio estimado (float)
         self.cliente_id = None    # ID del cliente que atiende ahora
+
+
+# ----------------- Almacenamiento de filas (persistente, SQLite) -----------------
+class RowStore:
+    """
+    Guarda filas de la simulación en una base SQLite temporal para no mantenerlas todas en RAM.
+    Cada fila almacena: iteration (int), row_json (text), cli_snap_json (text)
+    """
+    def __init__(self, path=None):
+        self._owns_file = False
+        if path is None:
+            fd, path = tempfile.mkstemp(prefix="tp4_rows_", suffix=".db")
+            os.close(fd)
+            self._owns_file = True
+        self.path = path
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._init_db()
+
+    def _init_db(self):
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                iteration INTEGER,
+                row_json TEXT,
+                cli_json TEXT
+            )
+            """
+        )
+        self.conn.commit()
+
+    def add_row(self, iteration, row, cli_snap):
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO rows (iteration, row_json, cli_json) VALUES (?, ?, ?)",
+            (iteration, json.dumps(row, ensure_ascii=False), json.dumps(cli_snap, ensure_ascii=False)),
+        )
+        if iteration % 100 == 0:
+            # flush reasonably often
+            self.conn.commit()
+
+    def finalize(self):
+        self.conn.commit()
+
+    def count(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM rows")
+        return cur.fetchone()[0]
+
+    def fetch_range(self, offset, limit):
+        cur = self.conn.cursor()
+        cur.execute("SELECT iteration, row_json, cli_json FROM rows ORDER BY id LIMIT ? OFFSET ?", (limit, offset))
+        for it, rj, cj in cur.fetchall():
+            yield it, json.loads(rj), json.loads(cj)
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        if self._owns_file:
+            try:
+                os.remove(self.path)
+            except Exception:
+                pass
 
 
 # ----------------- Motor de simulación -----------------
@@ -91,8 +175,9 @@ class SimulationEngine:
       (sale del sistema). El valor que se suma es reloj_actual - hora_llegada. Se muestra acumulado histórico.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, store=None):
         self.cfg = cfg
+        self.store = store
 
         # Parámetros generales
         self.t_inter = cfg["llegadas"]["tiempo_entre_llegadas_min"]
@@ -593,6 +678,11 @@ class SimulationEngine:
         }
 
         cli_snap = self.build_client_snapshot()
+        if getattr(self, 'store', None) is not None:
+            try:
+                self.store.add_row(self.iteration, row, cli_snap)
+            except Exception:
+                pass
         return row, cli_snap
 
     def _evento_fin_atencion(self, i):
@@ -738,6 +828,11 @@ class SimulationEngine:
             }
 
             cli_snap = self.build_client_snapshot()
+            if getattr(self, 'store', None) is not None:
+                try:
+                    self.store.add_row(self.iteration, row, cli_snap)
+                except Exception:
+                    pass
             return row, cli_snap
 
 
@@ -828,6 +923,11 @@ class SimulationEngine:
         }
 
         cli_snap = self.build_client_snapshot()
+        if getattr(self, 'store', None) is not None:
+            try:
+                self.store.add_row(self.iteration, row, cli_snap)
+            except Exception:
+                pass
         return row, cli_snap
 
 
@@ -873,65 +973,45 @@ class StatsWindow(tk.Toplevel):
 class SimulationWindow(tk.Toplevel):
     
     def run_all_events(self):
+        """Lanza un worker en background que genera filas (engine.siguiente_evento)
+        y las pone en una cola. La UI consume la cola por lotes para mantener
+        la interfaz responsiva y evitar bloquear el hilo principal.
         """
-        Ejecuta automáticamente todos los eventos de la simulación hasta finalizar.
-        Genera todas las filas en el Treeview de una sola vez.
-        """
-        while True:
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+
+        def worker():
             try:
-                if not self.engine.hay_mas():
-                    # Fin: integrar últimas estadísticas
-                    self.engine.finalizar_estadisticas()
-                    self.open_stats()
-                    self._refresh_stats_window(final=True)
-                    messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
-                    break
-
-                row, cli_snap = self.engine.siguiente_evento()
-
-                # Asegurar columnas de todos los clientes activos
-                for cid in sorted(cli_snap.keys()):
-                    self._ensure_client_columns(cid)
-
-                # Armar fila completa
-                values = []
-                for col_id in self.tree["columns"]:
-                    if self._is_client_column(col_id):
-                        # --- columnas dinámicas tipo c{id}_campo ---
+                while True:
+                    if not self.engine.hay_mas():
+                        # Finalizamos estadísticas y salimos
                         try:
-                            prefix, campo = col_id.split("_", 1)
-                        except ValueError:
-                            prefix, campo = col_id, ""
-                        cid_str = prefix[1:] if prefix.startswith("c") else prefix
-                        try:
-                            cid_int = int(cid_str)
-                        except ValueError:
-                            cid_int = None
+                            self.engine.finalizar_estadisticas()
+                        except Exception:
+                            pass
+                        break
 
-                        if cid_int is not None and cid_int in cli_snap:
-                            cli_info = cli_snap[cid_int]
-                            values.append(cli_info.get(campo, ""))
-                        else:
-                            values.append("")
-                    else:
-                        # --- columnas fijas normales (incluye cola) ---
-                        if col_id == "iteracion":
-                            values.append(str(self.engine.iteration))
-                        else:
-                            v = row.get(col_id, "")
-                            values.append("" if v == "" else str(v))
+                    try:
+                        row, cli_snap = self.engine.siguiente_evento()
+                    except StopIteration:
+                        break
 
-                tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                self.tree.insert("", "end", values=values, tags=(tag,))
-                self._draw_group_headers()
-                self._refresh_stats_window(final=False)
+                    # push to queue (worker -> ui)
+                    self._ui_queue.put((row, cli_snap, self.engine.iteration))
 
-            except StopIteration:
-                # Fin de simulación
-                self.open_stats()
-                self._refresh_stats_window(final=True)
-                messagebox.showinfo("Fin de simulación", "Se alcanzó el límite de tiempo o iteraciones.")
-                break
+            finally:
+                # Indicar fin con sentinel
+                self._ui_queue.put(None)
+                try:
+                    self.store.finalize()
+                except Exception:
+                    pass
+
+        self._worker_thread = threading.Thread(target=worker, daemon=True)
+        self._worker_thread.start()
+
+        # Programamos la rutina que procesa la cola y actualiza la UI
+        self.after(50, self._process_queue)
 
     
     def __init__(self, master, config_dict):
@@ -940,10 +1020,17 @@ class SimulationWindow(tk.Toplevel):
         self.geometry("1400x760")
         self.minsize(1200, 560)
 
-        self.engine = SimulationEngine(config_dict)
+        # Creamos almacenamiento persistente de filas y el motor usando ese store
+        self.store = RowStore()
+        self.engine = SimulationEngine(config_dict, store=self.store)
         self.modo_auto = bool(config_dict["simulacion"].get("modo_auto", False))
         self.stats_win = None
         self.known_clients = []  # clientes que ya generaron columnas
+
+        # Cola para comunicación worker -> UI
+        self._ui_queue = queue.Queue()
+        self._worker_thread = None
+        self._worker_done = False
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
@@ -1091,7 +1178,7 @@ class SimulationWindow(tk.Toplevel):
         self._insert_initialization_row()
         # Ejecutar toda la simulación automáticamente si así se configuró
         if self.modo_auto:
-            # Dejamos respirar a la UI y luego corremos todo
+            # Dejamos respirar a la UI y luego lanzamos el worker
             self.after(100, self.run_all_events)
 
 
@@ -1106,6 +1193,73 @@ class SimulationWindow(tk.Toplevel):
     def _refresh_stats_window(self, final=False):
         if self.stats_win is not None and self.stats_win.winfo_exists():
             self.stats_win.refresh(final=final)
+
+    def _process_queue(self):
+        """Procesa la cola de filas producidas por el worker e inserta en el Treeview por lotes."""
+        batch = []
+        while len(batch) < 200:
+            try:
+                item = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            batch.append(item)
+
+        for item in batch:
+            if item is None:
+                # sentinel: worker terminado
+                self._worker_done = True
+                # Abrir stats finales
+                try:
+                    self.open_stats()
+                    self._refresh_stats_window(final=True)
+                except Exception:
+                    pass
+                messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
+                continue
+
+            row, cli_snap, iteration = item
+
+            # Asegurar columnas de todos los clientes activos
+            for cid in sorted(cli_snap.keys()):
+                self._ensure_client_columns(cid)
+
+            # Armar fila completa
+            values = []
+            for col_id in self.tree["columns"]:
+                if self._is_client_column(col_id):
+                    try:
+                        prefix, campo = col_id.split("_", 1)
+                    except ValueError:
+                        prefix, campo = col_id, ""
+                    cid_str = prefix[1:] if prefix.startswith("c") else prefix
+                    try:
+                        cid_int = int(cid_str)
+                    except ValueError:
+                        cid_int = None
+
+                    if cid_int is not None and cid_int in cli_snap:
+                        cli_info = cli_snap[cid_int]
+                        values.append(cli_info.get(campo, ""))
+                    else:
+                        values.append("")
+                else:
+                    if col_id == "iteracion":
+                        values.append(str(iteration))
+                    else:
+                        v = row.get(col_id, "")
+                        values.append("" if v == "" else str(v))
+
+            tag = 'evenrow' if iteration % 2 == 0 else 'oddrow'
+            self.tree.insert("", "end", values=values, tags=(tag,))
+
+        # Refrescar UI y stats
+        if batch:
+            self._draw_group_headers()
+            self._refresh_stats_window(final=False)
+
+        # Seguir procesando si el worker no terminó
+        if not self._worker_done:
+            self.after(50, self._process_queue)
 
     def _apply_columns(self):
         """
