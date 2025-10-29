@@ -7,7 +7,7 @@ from collections import deque
 
 APP_TITLE = "Parámetros de Simulación - Biblioteca UTN - Grupo 8"
 ROW_EVEN_BG = "#ffffff"      # fila par
-ROW_ODD_BG = "#f9fafb"       # fila impar (gris muuuy suave)
+ROW_ODD_BG = "#e5e7eb"       
 ROW_SELECTED_BG = "#bfdbfe"  # azul suave para la fila seleccionada
 ROW_SELECTED_FG = "#000000"
 
@@ -921,7 +921,8 @@ class SimulationWindow(tk.Toplevel):
                             v = row.get(col_id, "")
                             values.append("" if v == "" else str(v))
 
-                self.tree.insert("", "end", values=values)
+                tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
+                self.tree.insert("", "end", values=values, tags=(tag,))
                 self._draw_group_headers()
                 self._refresh_stats_window(final=False)
 
@@ -1060,6 +1061,9 @@ class SimulationWindow(tk.Toplevel):
 
         self.tree = ttk.Treeview(wrapper, show="headings", height=20)
         self.tree.pack(fill="both", expand=True, side="left")
+
+        self.tree.tag_configure('evenrow', background=ROW_EVEN_BG)
+        self.tree.tag_configure('oddrow', background=ROW_ODD_BG)
 
         yscroll = ttk.Scrollbar(wrapper, orient="vertical", command=self.tree.yview)
         yscroll.pack(fill="y", side="right")
@@ -1272,7 +1276,7 @@ class SimulationWindow(tk.Toplevel):
                 vals.append("0")
             else:
                 vals.append(str(base.get(col_id, "")))
-        self.tree.insert("", "end", values=vals)
+        self.tree.insert("", "end", values=vals, tags=('evenrow',))
 
     def _ensure_client_columns(self, cid: int):
         """
@@ -1378,7 +1382,8 @@ class SimulationWindow(tk.Toplevel):
                     v = row.get(col_id, "")
                     values.append("" if v == "" else str(v))
 
-        self.tree.insert("", "end", values=values)
+        tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
+        self.tree.insert("", "end", values=values, tags=(tag,))
 
         # Redibujamos SIEMPRE el encabezado de grupos arriba
         self._draw_group_headers()
@@ -1396,6 +1401,17 @@ class App(tk.Tk):
         self.minsize(900, 680)
 
         self.style = ttk.Style(self)
+        self.style.theme_use('clam')
+        self.style.map(
+            "Treeview",
+            background=[("selected", ROW_SELECTED_BG)],
+            foreground=[("selected", ROW_SELECTED_FG)],
+        )
+        self.style.configure("Treeview.Heading",
+        background=TREE_HEADER_BG,
+        foreground=TREE_HEADER_FG,
+        relief="solid",            # Dibuja el borde
+        borderwidth=1)
         self.style.configure("Invalid.TEntry", fieldbackground="#ffe6e6")
         self.style.configure("Ok.TLabel", foreground="#15803d")
         self.style.configure("Bad.TLabel", foreground="#dc2626")
