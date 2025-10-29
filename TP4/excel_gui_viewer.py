@@ -5,7 +5,15 @@ import random
 import math
 from collections import deque
 
-APP_TITLE = "Parámetros de Simulación - Biblioteca (Streaming de filas + columnas por Cliente)"
+APP_TITLE = "Parámetros de Simulación - Biblioteca UTN - Grupo 8"
+ROW_EVEN_BG = "#ffffff"      # fila par
+ROW_ODD_BG = "#f9fafb"       # fila impar (gris muuuy suave)
+ROW_SELECTED_BG = "#bfdbfe"  # azul suave para la fila seleccionada
+ROW_SELECTED_FG = "#000000"
+
+TREE_HEADER_BG = "#1f2937"   # gris oscuro
+TREE_HEADER_FG = "#ffffff"   # texto blanco
+
 GROUP_BG = "#e8efff"
 GROUP_BORDER = "#a8b3d7"
 MAX_CAPACITY = 20  # Máximo total de personas dentro (2 bibliotecarios + hasta 18 clientes)
@@ -1015,7 +1023,7 @@ class SimulationWindow(tk.Toplevel):
         # Grupo ESTADISTICAS · BIBLIOTECARIOS
         # TIEMPO LIBRE B1 / B2 -> solo en ESTA iteración
         # ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS -> acumulado histórico total
-        add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO1", 230)
+        add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO 1", 230)
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
 
@@ -1029,7 +1037,7 @@ class SimulationWindow(tk.Toplevel):
             ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 5),
             ("TRANSACCION", 6, 7),
-            ("¿Dónde Lee? - solo si pide Libro (cuenta luego de la atención)", 8, 11),
+            ("¿Dónde Lee? - solo si pide Libro", 8, 11),
             ("BIBLIOTECARIO 1", 12, 15),
             ("BIBLIOTECARIO 2", 16, 19),
             ("COLA", 20, 20),
