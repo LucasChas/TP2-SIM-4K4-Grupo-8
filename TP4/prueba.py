@@ -7,7 +7,7 @@ from collections import deque
 
 APP_TITLE = "Parámetros de Simulación - Biblioteca UTN - Grupo 8"
 ROW_EVEN_BG = "#ffffff"      # fila par
-ROW_ODD_BG = "#e5e7eb"       
+ROW_ODD_BG = "#e5e7eb"
 ROW_SELECTED_BG = "#bfdbfe"  # azul suave para la fila seleccionada
 ROW_SELECTED_FG = "#000000"
 
@@ -108,8 +108,7 @@ class SimulationEngine:
         self.t_lect_biblio = cfg["lectura"]["tiempo_fijo_biblioteca_min"]
 
         self.time_limit = cfg["simulacion"]["tiempo_limite_min"]
-        
-        
+        self.iter_limit = cfg["simulacion"]["iteraciones_max"]
 
         # Estado temporal
         self.clock = cfg["simulacion"]["mostrar_vector_estado"]["desde_minuto_j"]
@@ -359,13 +358,16 @@ class SimulationEngine:
         return min(cand, key=lambda x: (x[0], x[1]))
 
     def hay_mas(self):
+        """
+        ¿Quedan eventos dentro de límites?
+        """
         self._clear_destroyed_clients()
+
         ne = self._proximo_evento()
         if ne is None:
             return False
         t, *_ = ne
-        return t <= self.time_limit
-
+        return (self.iteration < self.iter_limit) and (t <= self.time_limit)
 
     # ---------- snapshots / métricas para la UI ----------
     def build_client_snapshot(self):
@@ -414,7 +416,7 @@ class SimulationEngine:
                     }
 
             return snap
-    
+
 
 
     def snapshot_estadisticas(self):
@@ -456,6 +458,8 @@ class SimulationEngine:
         if ne is None:
             raise StopIteration("No hay más eventos pendientes.")
         t, _, tipo, data = ne
+        if self.iteration >= self.iter_limit:
+            raise StopIteration("Máximo de iteraciones alcanzado.")
         if t > self.time_limit:
             raise StopIteration("Se alcanzó el tiempo límite X.")
 
@@ -867,98 +871,30 @@ class StatsWindow(tk.Toplevel):
 
 # ----------------- Ventana de Simulación (Vector de Estado) -----------------
 class SimulationWindow(tk.Toplevel):
-    
-    
-    
-    
-    
-    def run_all_events(self):
-        """
-        Ejecuta automáticamente todos los eventos hasta finalizar.
-        Solo muestra en pantalla las primeras i filas de eventos y, al final,
-        inserta la última fila de la simulación.
-        """
-        while True:
-            try:
-                if not self.engine.hay_mas():
-                    # Fin: integrar últimas estadísticas y abrir stats
-                    self.engine.finalizar_estadisticas()
 
-                    # Si superamos i y guardamos la última fila, insertarla ahora
-                    if self._final_row_cache and not self._inserted_final:
-                        row_f, snap_f = self._final_row_cache
-                        # Asegurar columnas de todos los clientes que existan en el último snapshot
-                        for cid in sorted(snap_f.keys()):
-                            self._ensure_client_columns(cid)
-                        values = self._build_row_values(row_f, snap_f)
-                        tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                        self.tree.insert("", "end", values=values, tags=(tag,))
-                        self._draw_group_headers()
-                        self._inserted_final = True
-
-                    self.open_stats()
-                    self._refresh_stats_window(final=True)
-                    messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
-                    break
-
-                row, cli_snap = self.engine.siguiente_evento()
-
-                if self._rows_shown < self.i_limit:
-                    # Asegurar columnas solo para lo que se va a mostrar
-                    for cid in sorted(cli_snap.keys()):
-                        self._ensure_client_columns(cid)
-
-                    values = self._build_row_values(row, cli_snap)
-                    tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                    self.tree.insert("", "end", values=values, tags=(tag,))
-                    self._rows_shown += 1
-                    self._draw_group_headers()
-                else:
-                    # No insertamos más filas: cacheamos la última que va pasando
-                    self._final_row_cache = (row, cli_snap)
-
-                self._refresh_stats_window(final=False)
-
-            except StopIteration:
-                # Igual que arriba: insertar última fila si corresponde
-                self.engine.finalizar_estadisticas()
-                if self._final_row_cache and not self._inserted_final:
-                    row_f, snap_f = self._final_row_cache
-                    for cid in sorted(snap_f.keys()):
-                        self._ensure_client_columns(cid)
-                    values = self._build_row_values(row_f, snap_f)
-                    tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                    self.tree.insert("", "end", values=values, tags=(tag,))
-                    self._draw_group_headers()
-                    self._inserted_final = True
-
-                self.open_stats()
-                self._refresh_stats_window(final=True)
-                messagebox.showinfo("Fin de simulación", "Se alcanzó el tiempo límite X.")
-
-                break
-
-
-    
     def __init__(self, master, config_dict):
         super().__init__(master)
-        self.title("Vector de Estado - Simulación (Streaming memoria optimizada)")
+        self.title("Vector de Estado - Simulación Biblioteca UTN Grupo 8")
         self.geometry("1400x760")
         self.minsize(1200, 560)
 
         self.engine = SimulationEngine(config_dict)
         self.modo_auto = bool(config_dict["simulacion"].get("modo_auto", False))
-        self.stats_win = None
-        self.known_clients = [] 
-        self.layout_clientes_fijo = bool(config_dict["simulacion"].get("layout_clientes_fijo", True))
-        self.max_clientes_fijos  = int(config_dict["simulacion"].get("max_clientes_fijos", 20))  # 20 = cap de personas en sala
 
-        # Ventana deslizante de visualización
-        self.i_limit = int(config_dict["simulacion"]["mostrar_vector_estado"]["i_iteraciones"])
-        self._rows_shown = 0                 # filas de eventos ya insertadas (no cuenta INICIALIZACION)
-        self._final_row_cache = None         # (row, cli_snap) de la última fila de la simulación
-        self._inserted_final = False         # bandera para no duplicar la última fila
- # clientes que ya generaron columnas
+        # --- MODIFICADO: Guardamos el límite de 'i' ---
+        self.i_iter_mostrar = config_dict["simulacion"]["mostrar_vector_estado"]["i_iteraciones"]
+
+        self.stats_win = None
+        self.known_clients = []  # clientes que ya generaron columnas
+
+        # --- NUEVO: Límite de columnas de clientes para pre-generar ---
+        self.MAX_CLIENT_COLUMNS_DISPLAY = 100
+        self.client_col_widths = {
+            "estado": 110,
+            "hora_llegada": 130,
+            "a_que_fue": 120,
+            "cuando_termina": 180,
+        }
 
         root = ttk.Frame(self, padding=8)
         root.pack(fill="both", expand=True)
@@ -971,6 +907,7 @@ class SimulationWindow(tk.Toplevel):
             top,
             text=(
                 f"Config → X={config_dict['simulacion']['tiempo_limite_min']} min | "
+                f"N={config_dict['simulacion']['iteraciones_max']} | "
                 f"i={config_dict['simulacion']['mostrar_vector_estado']['i_iteraciones']} "
                 f"desde j={config_dict['simulacion']['mostrar_vector_estado']['desde_minuto_j']}  "
                 f"| t_entre_llegadas={config_dict['llegadas']['tiempo_entre_llegadas_min']} min"
@@ -989,11 +926,12 @@ class SimulationWindow(tk.Toplevel):
             pass
 
 
-        # Definición de columnas base
+        # --- MODIFICADO: Definición de columnas base + Pre-generación de columnas de clientes ---
         self.columns = []
         self.groups = []
 
         def add_col(cid, text, w):
+            # Para las columnas base, 'w' es el ancho real
             self.columns.append({"id": cid, "text": text, "w": w})
 
         # Grupo "" (iteración / evento / reloj)
@@ -1036,18 +974,14 @@ class SimulationWindow(tk.Toplevel):
         add_col("biblio_personas", "Personas en la biblioteca (MAXIMO 20)", 270)
 
         # Grupo ESTADISTICAS · BIBLIOTECARIOS
-        # TIEMPO LIBRE B1 / B2 -> solo en ESTA iteración
-        # ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS -> acumulado histórico total
         add_col("est_b1_libre", "TIEMPO LIBRE BIBLIOTECARIO 1", 230)
         add_col("est_b2_libre", "TIEMPO LIBRE BIBLIOTECARIO2", 230)
         add_col("est_bib_ocioso_acum", "ACUMULADOR TIEMPO OCIOSO BIBLIOTECARIOS", 330)
 
-        # Grupo ESTADISTICAS · CLIENTESa
-        # ACUMULADOR TIEMPO PERMANENCIA -> acumulado histórico de (reloj actual - hora_llegada)
-        # SOLO cuando el cliente pasa a DESTRUCCION
+        # Grupo ESTADISTICAS · CLIENTES
         add_col("est_cli_perm_acum", "ACUMULADOR TIEMPO PERMANENCIA", 270)
 
-        # Índices de grupos para el header de arriba
+        # Índices de grupos para el header de arriba (solo los base)
         self.groups = [
             ("", 0, 2),
             ("LLEGADA_CLIENTE", 3, 5),
@@ -1060,6 +994,31 @@ class SimulationWindow(tk.Toplevel):
             ("ESTADISTICAS · BIBLIOTECARIOS", 23, 25),
             ("ESTADISTICAS · CLIENTES", 26, 26),
         ]
+
+        # --- NUEVO: Pre-generar TODAS las columnas de clientes (ocultas) ---
+        for cid in range(1, self.MAX_CLIENT_COLUMNS_DISPLAY + 1):
+            start_idx = len(self.columns)
+
+            # Definimos las 4 columnas para este cliente
+            new_cols_defs = [
+                {"id": f"c{cid}_estado", "text": "ESTADO", "w_real": self.client_col_widths["estado"]},
+                {"id": f"c{cid}_hora_llegada", "text": "HORA_LLEGADA", "w_real": self.client_col_widths["hora_llegada"]},
+                {"id": f"c{cid}_a_que_fue", "text": "A QUE FUE", "w_real": self.client_col_widths["a_que_fue"]},
+                {"id": f"c{cid}_cuando_termina", "text": "Cuando termina de leer", "w_real": self.client_col_widths["cuando_termina"]},
+            ]
+
+            for col_def in new_cols_defs:
+                # 'w=0' -> Hacemos que todas las columnas de cliente inicien ocultas
+                self.columns.append({
+                    "id": col_def["id"],
+                    "text": col_def["text"],
+                    "w": 0,  # <- Inicia oculta (ancho CERO)
+                })
+
+            end_idx = len(self.columns) - 1
+            # Registramos el grupo para el header (el header se dibujará bien, pero con ancho 0)
+            self.groups.append((f"Cliente {cid}", start_idx, end_idx))
+
 
         # --- UI: canvas de encabezado de grupos + Treeview ---
         wrapper = ttk.Frame(root)
@@ -1098,13 +1057,6 @@ class SimulationWindow(tk.Toplevel):
         xscroll.configure(command=on_xscroll)
 
         # Aplicar columnas al Treeview y dibujar encabezados
-        # Congelar layout: columnas de Cliente 1..N desde el inicio
-        if self.layout_clientes_fijo:
-            for cid in range(1, self.max_clientes_fijos + 1):
-                # reutilizamos tu helper actual; si ya existe, no hace nada
-                self._ensure_client_columns(cid)
-
-        
         self._apply_columns()
         self._draw_group_headers()
 
@@ -1115,6 +1067,126 @@ class SimulationWindow(tk.Toplevel):
             # Dejamos respirar a la UI y luego corremos todo
             self.after(100, self.run_all_events)
 
+
+    # --- MODIFICADO: Reemplazado run_all_events ---
+    def run_all_events(self):
+        """
+        Ejecuta automáticamente todos los eventos de la simulación hasta finalizar.
+        Genera las filas en el Treeview, respetando el límite 'i_iter_mostrar'
+        y mostrando siempre la última fila.
+        """
+        last_processed_row_data = None
+        last_row_shown = False
+
+        # Variable para saber si la última fila que mostraremos
+        # es la de "StopIteration" o la del fin natural.
+        final_row_to_show = None
+
+        while True:
+            try:
+                if not self.engine.hay_mas():
+                    # Fin normal de la simulación (se acabaron los eventos)
+                    self.engine.finalizar_estadisticas()
+                    self.open_stats()
+                    self._refresh_stats_window(final=True)
+
+                    # Guardamos la última fila procesada para mostrarla
+                    final_row_to_show = last_processed_row_data
+
+                    messagebox.showinfo("Fin de simulación", "Se completó toda la simulación.")
+                    break # Salimos del loop
+
+                # Procesamos el siguiente evento
+                row, cli_snap = self.engine.siguiente_evento()
+                last_processed_row_data = (row, cli_snap)
+                last_row_shown = False
+
+                # --- LÓGICA DE FILTRADO 'i' ---
+                # self.engine.iteration es el número de fila (1, 2, 3...)
+                # self.i_iter_mostrar es el límite (ej. 200)
+                # Si i=200, queremos mostrar 1, 2, ... 199.
+                # La condición es: self.engine.iteration < self.i_iter_mostrar
+                if self.engine.iteration < self.i_iter_mostrar:
+                    self._insert_row_into_tree(row, cli_snap)
+                    last_row_shown = True
+                else:
+                    # Estamos en una iteración >= i (ej. 200 o más).
+                    # No la mostramos, seguimos procesando en silencio.
+                    pass
+
+            except StopIteration:
+                # Fin por StopIteration (límite N o X)
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+
+                # Guardamos la última fila procesada (la que causó el StopIteration)
+                final_row_to_show = last_processed_row_data
+
+                messagebox.showinfo("Fin de simulación", "Se alcanzó el límite de tiempo o iteraciones.")
+                break # Salimos del loop
+
+        # --- FUERA DEL LOOP ---
+        # Al salir (sea por fin natural o StopIteration),
+        # mostramos la ÚLTIMA fila, si no se mostró ya.
+        if not last_row_shown and final_row_to_show is not None:
+            row, cli_snap = final_row_to_show
+            self._insert_row_into_tree(row, cli_snap)
+
+
+    # --- NUEVO: Helper para insertar fila ---
+    def _insert_row_into_tree(self, row, cli_snap):
+        """
+        Helper para insertar una fila de datos (row, cli_snap) en el Treeview.
+        """
+        # Creamos columnas por cada cliente activo (incluye los que acaban de destruirse en ESTA fila)
+        for cid in sorted(cli_snap.keys()):
+            self._ensure_client_columns(cid)
+
+        # Preparamos los valores para TODAS las columnas actuales
+        values = []
+        for col_id in self.tree["columns"]:
+            if self._is_client_column(col_id):
+                # --- columnas dinámicas tipo c{id}_campo ---
+                try:
+                    prefix, campo = col_id.split("_", 1)
+                except ValueError:
+                    prefix, campo = col_id, ""
+                cid_str = prefix[1:] if prefix.startswith("c") else prefix
+                try:
+                    cid_int = int(cid_str)
+                except ValueError:
+                    cid_int = None
+
+                if cid_int is not None and cid_int in cli_snap:
+                    cli_info = cli_snap[cid_int]
+                    if campo == "estado":
+                        values.append(cli_info.get("estado", ""))
+                    elif campo == "hora_llegada":
+                        values.append(cli_info.get("hora_llegada", ""))
+                    elif campo == "a_que_fue":
+                        values.append(cli_info.get("a_que_fue", ""))
+                    elif campo == "cuando_termina":
+                        values.append(cli_info.get("cuando_termina", ""))
+                    else:
+                        values.append("")
+                else:
+                    values.append("")
+            else:
+                # --- columnas fijas normales (incluye cola) ---
+                if col_id == "iteracion":
+                    values.append(str(self.engine.iteration))
+                else:
+                    v = row.get(col_id, "")
+                    values.append("" if v == "" else str(v))
+
+        tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
+        self.tree.insert("", "end", values=values, tags=(tag,))
+
+        # Redibujamos SIEMPRE el encabezado de grupos arriba
+        self._draw_group_headers()
+
+        # refrescamos ventana de stats si está abierta
+        self._refresh_stats_window(final=False)
 
     # --- Helpers UI ---
     def open_stats(self):
@@ -1187,35 +1259,38 @@ class SimulationWindow(tk.Toplevel):
                 continue
             x0 = xs[i0][0]
             x1 = xs[i1][1]
-
-            # caja del grupo
-            self.header_canvas.create_rectangle(
-                x0, 0, x1, h,
-                fill=group_bg_color,
-                outline=group_border_color
-            )
-            # título del grupo
-            if text:
-                self.header_canvas.create_text(
-                    (x0 + x1) / 2, h / 2,
-                    text=text,
-                    anchor="center",
-                    font=("Segoe UI", 9, "bold"),
-                    fill="#000000"
+            
+            # Solo dibujamos el grupo si tiene un ancho visible
+            if x1 > x0:
+                # caja del grupo
+                self.header_canvas.create_rectangle(
+                    x0, 0, x1, h,
+                    fill=group_bg_color,
+                    outline=group_border_color
                 )
+                # título del grupo
+                if text:
+                    self.header_canvas.create_text(
+                        (x0 + x1) / 2, h / 2,
+                        text=text,
+                        anchor="center",
+                        font=("Segoe UI", 9, "bold"),
+                        fill="#000000"
+                    )
 
-            # línea inferior del grupo
-            self.header_canvas.create_line(
-                x0, h - 1, x1, h - 1,
-                fill=group_separator_color,
-                width=1
-            )
-            group_boundaries.add(x0)
-            group_boundaries.add(x1)
+                # línea inferior del grupo
+                self.header_canvas.create_line(
+                    x0, h - 1, x1, h - 1,
+                    fill=group_separator_color,
+                    width=1
+                )
+                group_boundaries.add(x0)
+                group_boundaries.add(x1)
 
         # líneas finas por cada columna
         for _, x1 in xs:
-            self.header_canvas.create_line(x1, 0, x1, h, fill=fine_line_color)
+            if x1 > 0: # No dibujar líneas en el borde izquierdo
+                self.header_canvas.create_line(x1, 0, x1, h, fill=fine_line_color)
 
         # remarcar bordes de grupo
         for x_boundary in sorted(list(group_boundaries)):
@@ -1252,34 +1327,6 @@ class SimulationWindow(tk.Toplevel):
 
             # lo que viene después de la 'c' tienen que ser dígitos
             return prefix[1:].isdigit()
-    
-    def _build_row_values(self, row, cli_snap):
-        values = []
-        for col_id in self.tree["columns"]:
-            if self._is_client_column(col_id):
-                try:
-                    prefix, campo = col_id.split("_", 1)
-                except ValueError:
-                    prefix, campo = col_id, ""
-                cid_str = prefix[1:] if prefix.startswith("c") else prefix
-                try:
-                    cid_int = int(cid_str)
-                except ValueError:
-                    cid_int = None
-
-                if cid_int is not None and cid_int in cli_snap:
-                    cli_info = cli_snap[cid_int]
-                    values.append(cli_info.get(campo, ""))
-                else:
-                    values.append("")
-            else:
-                if col_id == "iteracion":
-                    values.append(str(self.engine.iteration))
-                else:
-                    v = row.get(col_id, "")
-                    values.append("" if v == "" else str(v))
-        return values
-
 
     def _insert_initialization_row(self):
         eng = self.engine
@@ -1327,107 +1374,98 @@ class SimulationWindow(tk.Toplevel):
                 vals.append(str(base.get(col_id, "")))
         self.tree.insert("", "end", values=vals, tags=('evenrow',))
 
+    # --- MODIFICADO: Reemplazado _ensure_client_columns ---
     def _ensure_client_columns(self, cid: int):
         """
-        Si aparece un cliente nuevo (por ejemplo Cliente 5),
-        agregamos al final 4 columnas:
-          c5_estado, c5_hora_llegada, c5_a_que_fue, c5_cuando_termina
-        y creamos un grupo "Cliente 5" para el header gráfico.
+        Muestra las columnas pre-generadas para un cliente 'cid'
+        cambiando su ancho de 0 al ancho real.
+        Esto evita el bug de 'treeview' de añadir columnas dinámicamente.
         """
         if cid in self.known_clients:
-            return  # El cliente ya existe, no hacemos nada
+            return  # Columnas ya visibles
 
-        # 1. Actualizar la definición de columnas en memoria
-        self.known_clients.append(cid)
-        start_idx = len(self.columns)
-
-        new_cols = [
-            {"id": f"c{cid}_estado", "text": "ESTADO", "w": 110},
-            {"id": f"c{cid}_hora_llegada", "text": "HORA_LLEGADA", "w": 130},
-            {"id": f"c{cid}_a_que_fue", "text": "A QUE FUE", "w": 120},
-            {"id": f"c{cid}_cuando_termina", "text": "Cuando termina de leer", "w": 180},
-        ]
-
-        self.columns.extend(new_cols)
-        end_idx = len(self.columns) - 1
-
-        # 2. Registramos este bloque como nuevo grupo visual "Cliente X"
-        self.groups.append((f"Cliente {cid}", start_idx, end_idx))
-
-        # 3. Re-aplicamos TODAS las columnas (viejas + nuevas) al Treeview
-        #    Esto leerá de self.columns y configurará todo de nuevo.
-        self._apply_columns()
-
-        # 4. Redibujamos el header de grupos (que _apply_columns no hace)
-        self._draw_group_headers()
-
-    def on_next(self):
-        """
-        Avanza 1 evento manualmente.
-        Muestra hasta i filas y, cuando finaliza toda la simulación, inserta la última fila.
-        """
-        # ¿Ya no queda nada? Finalizar e insertar última fila si corresponde
-        if not self.engine.hay_mas():
-            stats = self.engine.finalizar_estadisticas()
-
-            if self._final_row_cache and not self._inserted_final:
-                row_f, snap_f = self._final_row_cache
-                for cid in sorted(snap_f.keys()):
-                    self._ensure_client_columns(cid)
-                values = self._build_row_values(row_f, snap_f)
-                tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                self.tree.insert("", "end", values=values, tags=(tag,))
-                self._draw_group_headers()
-                self._inserted_final = True
-
-            self.open_stats()
-            self._refresh_stats_window(final=True)
-            messagebox.showinfo(
-    "Fin de simulación",
-    "No hay más eventos (tiempo límite alcanzado o no hay pendientes)."
-)
-
-
-            self._draw_group_headers()
+        if cid > self.MAX_CLIENT_COLUMNS_DISPLAY:
+            # No podemos mostrar este cliente, superó el límite de UI
+            # Podríamos loguear esto si fuera necesario
+            if cid == self.MAX_CLIENT_COLUMNS_DISPLAY + 1:
+                print(f"ADVERTENCIA: Se superó el límite de {self.MAX_CLIENT_COLUMNS_DISPLAY} columnas de clientes en la UI.")
+                print(f"El cliente {cid} y subsiguientes no se mostrarán en columnas separadas.")
             return
 
-        try:
-            row, cli_snap = self.engine.siguiente_evento()
-        except StopIteration as e:
-            # Insertar última fila si corresponde y finalizar
-            self.engine.finalizar_estadisticas()
-            if self._final_row_cache and not self._inserted_final:
-                row_f, snap_f = self._final_row_cache
-                for cid in sorted(snap_f.keys()):
-                    self._ensure_client_columns(cid)
-                values = self._build_row_values(row_f, snap_f)
-                tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-                self.tree.insert("", "end", values=values, tags=(tag,))
-                self._draw_group_headers()
-                self._inserted_final = True
+        # 1. Marcar como conocido
+        self.known_clients.append(cid)
 
+        # 2. Definir las columnas a mostrar y sus anchos reales
+        col_map = {
+            f"c{cid}_estado": self.client_col_widths["estado"],
+            f"c{cid}_hora_llegada": self.client_col_widths["hora_llegada"],
+            f"c{cid}_a_que_fue": self.client_col_widths["a_que_fue"],
+            f"c{cid}_cuando_termina": self.client_col_widths["cuando_termina"],
+        }
+
+        # 3. Iterar y cambiar el ancho de las columnas en el Treeview
+        try:
+            for col_id, real_width in col_map.items():
+                self.tree.column(col_id, width=real_width)
+        except tk.TclError as e:
+            # Esto podría pasar si el col_id no existe
+            print(f"Error al intentar mostrar la columna {col_id}: {e}")
+            return
+
+        # 4. Redibujar los headers (para actualizar el scrollregion y que se vea el grupo)
+        self._draw_group_headers()
+
+
+    # --- MODIFICADO: Reemplazado on_next ---
+    def on_next(self):
+        """
+        Botón "Siguiente evento":
+        - Le pide al motor el siguiente evento.
+        - Actualiza columnas de clientes si aparecen nuevos.
+        - Inserta la nueva fila.
+        - Redibuja SIEMPRE el header de grupos para que nunca desaparezca.
+        - Respeta el límite 'i' de iteraciones.
+        """
+        try:
+            if not self.engine.hay_mas():
+                stats = self.engine.finalizar_estadisticas()
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+                messagebox.showinfo(
+                    "Fin de simulación",
+                    "No hay más eventos (límite de tiempo o iteraciones alcanzado)."
+                )
+                self._draw_group_headers()
+                return
+
+            # --- NUEVO: Chequeo de límite 'i' en modo manual ---
+            # self.engine.iteration es la fila ANTERIOR (ej: 0 en la inicial).
+            # La próxima fila será la self.engine.iteration + 1.
+            # Si i=200, queremos mostrar hasta la fila 200.
+            # Si la *próxima* iteración (iteration+1) es > i (ej. 201), no la mostramos.
+            if (self.engine.iteration + 1) > self.i_iter_mostrar:
+                messagebox.showinfo(
+                    "Límite 'i' alcanzado",
+                    f"Se alcanzó el límite de i={self.i_iter_mostrar} iteraciones para el modo manual."
+                )
+                # Finalizamos las estadísticas por si acaso
+                stats = self.engine.finalizar_estadisticas()
+                self.open_stats()
+                self._refresh_stats_window(final=True)
+                return
+
+            row, cli_snap = self.engine.siguiente_evento()
+
+        except StopIteration as e:
             self.open_stats()
             self._refresh_stats_window(final=True)
             messagebox.showinfo("Fin de simulación", str(e))
             self._draw_group_headers()
             return
 
-        # Mostrar o cachear según ventana de i filas
-        if self._rows_shown < self.i_limit:
-            for cid in sorted(cli_snap.keys()):
-                self._ensure_client_columns(cid)
-
-            values = self._build_row_values(row, cli_snap)
-            tag = 'evenrow' if self.engine.iteration % 2 == 0 else 'oddrow'
-            self.tree.insert("", "end", values=values, tags=(tag,))
-            self._rows_shown += 1
-            self._draw_group_headers()
-        else:
-            self._final_row_cache = (row, cli_snap)
-
-        # Actualizar estadísticas si la ventana está abierta
-        self._refresh_stats_window(final=False)
-
+        # --- Refactorizado ---
+        # El código de inserción de fila se movió a _insert_row_into_tree
+        self._insert_row_into_tree(row, cli_snap)
 
 
 # ----------------- Ventana Principal (input y validación) -----------------
@@ -1685,7 +1723,7 @@ class App(tk.Tk):
     def reset_defaults(self):
         defaults = {
             "tiempo_limite": 60,
-            "i_mostrar": 10,
+            "i_mostrar": 200,
             "j_inicio": 0,
             "t_entre_llegadas": 4,
             "pct_pedir": 45,
@@ -1720,12 +1758,17 @@ class App(tk.Tk):
             return val
 
         t_lim = need_int("tiempo_limite", "Tiempo límite X", 1, 10_000_000)
+        n_max = 100_000
         i_mos = need_int("i_mostrar", "i (iteraciones a mostrar)", 1, 100_000)
         j_ini = need_int("j_inicio", "j (minuto de inicio)", 0, 10_000_000)
 
         if None not in (t_lim, j_ini) and j_ini >= t_lim:
             errors.append("• j debe ser menor que X.")
             mark += ["j_inicio", "tiempo_limite"]
+
+        if None not in (i_mos, n_max) and i_mos > n_max:
+            errors.append("• i no debería exceder N.")
+            mark += ["i_mostrar", "iteraciones_max"]
 
         t_lleg = need_int("t_entre_llegadas", "Tiempo entre llegadas (min)", 1, 10_000)
 
@@ -1762,6 +1805,7 @@ class App(tk.Tk):
         cfg = {
             "simulacion": {
                 "tiempo_limite_min": t_lim,
+                "iteraciones_max": n_max,
                 "mostrar_vector_estado": {
                     "i_iteraciones": i_mos,
                     "desde_minuto_j": j_ini
